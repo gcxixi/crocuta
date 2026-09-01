@@ -21,9 +21,14 @@ if (baseURL) {
     mappings: "AAAAA",
   })], { type: "application/json" }), "app.min.js");
   form.append("name", "app.min.js");
+  const headers = {};
+  if (process.env.SENTRYX_ARTIFACT_TOKEN) {
+    headers["X-SentryX-Management-Token"] = process.env.SENTRYX_ARTIFACT_TOKEN;
+  }
   const upload = await fetch(`${baseURL}/api/0/projects/1/releases/sentryx-source-e2e%401.0.0/files/`, {
     method: "POST",
     body: form,
+    headers,
   });
   if (!upload.ok) throw new Error(`source map upload failed: ${upload.status}`);
 }

@@ -7,6 +7,8 @@
 - `framework-sdk.mjs`：直接加载官方 `@sentry/react`、`@sentry/vue`、`@sentry/angular`，验证框架 SDK 共享的 JavaScript Error 上报契约。
 - `sourcemap-sdk.mjs`：通过 `@sentry/node` 发送带压缩堆栈的事件，验证 Source Map 符号化。
 
+设置 `SENTRYX_ARTIFACT_TOKEN` 时，SourceMap 脚本会用管理 token 上传 artifact，可用于验证生产鉴权配置。
+
 运行：
 
 ```bash
