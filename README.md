@@ -81,3 +81,5 @@ npm run test:e2e
 测试会在进程内启动 Relay 与 Server，并让官方 `@sentry/node`、`@sentry/browser` SDK 将两个不同动态订单号的错误发送到 Relay，断言最终只有一个 Issue 且事件计数为 2。
 
 PostgreSQL 运行模式：先执行 `migrations/001_init.sql`，再设置 `SENTRYX_DATABASE_URL`。`sentryx-server -role=all` 同时提供 API 和 Worker；生产环境可拆为 `-role=api` 与 `-role=worker` 两组实例。
+
+NUC 真实 SDK E2E 的启动、执行、数据库核对和重启恢复步骤见 [`docs/e2e-nuc.md`](docs/e2e-nuc.md)。
