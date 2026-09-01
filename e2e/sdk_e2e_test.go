@@ -97,6 +97,55 @@ func TestBrowserSDKThroughRelayAggregatesIssue(t *testing.T) {
 	}
 }
 
+func TestFrameworkSDKsThroughRelay(t *testing.T) {
+	serverApp := sentryx.NewApp(nil)
+	server := httptest.NewServer(serverApp.Handler())
+	t.Cleanup(server.Close)
+
+	relay := httptest.NewServer(sentryx.NewRelay(server.URL, sentryx.DefaultMaxEnvelopeBytes, "e2e-relay"))
+	t.Cleanup(relay.Close)
+
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("node", filepath.Join(root, "framework-sdk.mjs"))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "SENTRYX_DSN=http://public@"+relay.URL[len("http://"):]+"/1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("framework SDK E2E failed: %v\n%s", err, output)
+	}
+
+	response, err := http.Get(server.URL + "/api/0/events?project=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("events status = %d", response.StatusCode)
+	}
+	var events []sentryx.Event
+	if err := json.NewDecoder(response.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("framework events = %d, want 3: %#v", len(events), events)
+	}
+	seen := map[string]bool{}
+	for _, event := range events {
+		seen[event.Release] = true
+		if event.Platform != "javascript" {
+			t.Fatalf("framework event platform = %q, want javascript", event.Platform)
+		}
+	}
+	for _, release := range []string{"sentryx-react-e2e@1.0.0", "sentryx-vue-e2e@1.0.0", "sentryx-angular-e2e@1.0.0"} {
+		if !seen[release] {
+			t.Fatalf("missing framework release %q in %#v", release, seen)
+		}
+	}
+}
+
 func TestNodeSDKSourceMapUploadAndSymbolication(t *testing.T) {
 	serverApp := sentryx.NewApp(nil)
 	server := httptest.NewServer(serverApp.Handler())

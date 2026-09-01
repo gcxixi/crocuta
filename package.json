@@ -6,8 +6,20 @@
     "test:e2e": "go test ./e2e -v"
   },
   "devDependencies": {
+    "@angular/common": "^20.3.0",
+    "@angular/compiler": "^20.3.0",
+    "@angular/core": "^20.3.0",
+    "@angular/router": "^20.3.0",
+    "@sentry/angular": "^10.73.0",
     "@sentry/browser": "^10.73.0",
     "@sentry/node": "^10.25.0",
-    "jsdom": "^29.1.1"
+    "@sentry/react": "^10.73.0",
+    "@sentry/vue": "^10.73.0",
+    "jsdom": "^29.1.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "rxjs": "^7.8.2",
+    "vue": "^3.5.21",
+    "zone.js": "^0.15.1"
   }
 }
