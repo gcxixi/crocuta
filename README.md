@@ -67,7 +67,7 @@ testdata/sentry/
 
 ## 当前状态
 
-已完成首个可运行的内存垂直切片：Go Relay、Go Server、Envelope/Store 接入、JavaScript Error 规范化、基础分组与 Issue 查询；Node.js 和 Browser 官方 Sentry SDK 的端到端测试均已通过。该切片用于快速验证协议和领域闭环，尚未替代方案中的 PostgreSQL 持久队列、Source Map、Release 管理和生产鉴权配置，后续按 `docs/roadmap.md` 推进。
+已完成首个可运行的内存垂直切片：Go Relay、Go Server、Envelope/Store 接入、JavaScript Error 规范化、基础分组与 Issue 查询；Node.js 和 Browser 官方 Sentry SDK 的端到端测试均已通过。Source Map/Release 也已具备内存 MVP，并由官方 Node SDK E2E 验证上传、匹配和符号化。该切片用于快速验证协议和领域闭环，尚未替代方案中的 PostgreSQL 持久队列、S3 BlobStore 和生产鉴权配置，后续按 `docs/roadmap.md` 推进。
 
 ## 本地验证
 

@@ -25,24 +25,27 @@ const DefaultMaxEnvelopeBytes int64 = 5 << 20
 // fields needed for later language-specific processors without exposing the
 // Sentry wire format to the issue store.
 type Event struct {
-	ProjectID   string            `json:"project_id"`
-	EventID     string            `json:"event_id"`
-	OccurredAt  time.Time         `json:"occurred_at"`
-	ReceivedAt  time.Time         `json:"received_at"`
-	Platform    string            `json:"platform,omitempty"`
-	Level       string            `json:"level,omitempty"`
-	Release     string            `json:"release,omitempty"`
-	Dist        string            `json:"dist,omitempty"`
-	Environment string            `json:"environment,omitempty"`
-	Title       string            `json:"title"`
-	Message     string            `json:"message,omitempty"`
-	Culprit     string            `json:"culprit,omitempty"`
-	Fingerprint []string          `json:"fingerprint,omitempty"`
-	Exception   json.RawMessage   `json:"exception,omitempty"`
-	Stacktrace  json.RawMessage   `json:"stacktrace,omitempty"`
-	Tags        map[string]string `json:"tags,omitempty"`
-	Raw         map[string]any    `json:"raw,omitempty"`
-	IssueID     string            `json:"issue_id"`
+	ProjectID           string            `json:"project_id"`
+	EventID             string            `json:"event_id"`
+	OccurredAt          time.Time         `json:"occurred_at"`
+	ReceivedAt          time.Time         `json:"received_at"`
+	Platform            string            `json:"platform,omitempty"`
+	Level               string            `json:"level,omitempty"`
+	Release             string            `json:"release,omitempty"`
+	Dist                string            `json:"dist,omitempty"`
+	Environment         string            `json:"environment,omitempty"`
+	Title               string            `json:"title"`
+	Message             string            `json:"message,omitempty"`
+	Culprit             string            `json:"culprit,omitempty"`
+	Fingerprint         []string          `json:"fingerprint,omitempty"`
+	Exception           json.RawMessage   `json:"exception,omitempty"`
+	Stacktrace          json.RawMessage   `json:"stacktrace,omitempty"`
+	Frames              []StackFrame      `json:"frames,omitempty"`
+	SymbolicatedFrames  []StackFrame      `json:"symbolicated_frames,omitempty"`
+	SymbolicationStatus string            `json:"symbolication_status,omitempty"`
+	Tags                map[string]string `json:"tags,omitempty"`
+	Raw                 map[string]any    `json:"raw,omitempty"`
+	IssueID             string            `json:"issue_id"`
 }
 
 type Issue struct {
@@ -62,10 +65,11 @@ type Store struct {
 	events    map[string]Event
 	issues    map[string]*Issue
 	groupToID map[string]string
+	artifacts *ArtifactStore
 }
 
 func NewStore() *Store {
-	return &Store{events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string)}
+	return &Store{events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string), artifacts: NewArtifactStore()}
 }
 
 type App struct {
@@ -78,6 +82,9 @@ type App struct {
 func NewApp(store *Store) *App {
 	if store == nil {
 		store = NewStore()
+	}
+	if store.artifacts == nil {
+		store.artifacts = NewArtifactStore()
 	}
 	return &App{Store: store, MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}
 }
@@ -101,6 +108,14 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodGet {
 		projectID := r.URL.Query().Get("project")
 		writeJSON(w, http.StatusOK, a.Store.ListIssues(projectID))
+		return
+	}
+	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "events" && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, a.Store.ListEvents(r.URL.Query().Get("project"), r.URL.Query().Get("issue")))
+		return
+	}
+	if isArtifactUploadPath(parts) && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
+		a.handleArtifactUpload(w, r, parts)
 		return
 	}
 	if len(parts) < 3 || parts[0] != "api" {
@@ -161,6 +176,7 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 		if err != nil {
 			continue
 		}
+		s.symbolicate(&event)
 		groupHash := groupingHash(event)
 		s.mu.Lock()
 		key := projectID + ":" + event.EventID
@@ -184,6 +200,89 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 		accepted++
 	}
 	return accepted, nil
+}
+
+func (s *Store) symbolicate(event *Event) {
+	if s.artifacts == nil || event.Release == "" || len(event.Frames) == 0 {
+		event.SymbolicationStatus = "not_attempted"
+		return
+	}
+	for _, frame := range event.Frames {
+		mapped, ok := s.artifacts.Lookup(event.ProjectID, event.Release, event.Dist, frame.Filename, frame.Lineno, frame.Colno)
+		if !ok {
+			continue
+		}
+		event.SymbolicatedFrames = append(event.SymbolicatedFrames, mapped)
+		if event.Culprit == "" || event.Culprit == frame.Function+"@"+frame.Filename {
+			event.Culprit = mapped.Function + "@" + mapped.Filename
+		}
+	}
+	if len(event.SymbolicatedFrames) > 0 {
+		event.SymbolicationStatus = "symbolicated"
+	} else {
+		event.SymbolicationStatus = "miss"
+	}
+}
+
+func isArtifactUploadPath(parts []string) bool {
+	if len(parts) >= 7 && parts[0] == "api" && parts[1] == "0" && parts[2] == "projects" {
+		if len(parts) == 7 && parts[4] == "releases" && parts[6] == "files" {
+			return true
+		}
+		if len(parts) == 8 && parts[5] == "releases" && parts[7] == "files" {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) handleArtifactUpload(w http.ResponseWriter, r *http.Request, parts []string) {
+	projectIndex, releaseIndex := 3, 5
+	if len(parts) == 8 {
+		projectIndex, releaseIndex = 4, 6
+	}
+	projectID, _ := url.PathUnescape(parts[projectIndex])
+	release, _ := url.PathUnescape(parts[releaseIndex])
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = r.Header.Get("X-Sentry-Artifact-Name")
+	}
+	var body []byte
+	var err error
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		r.Body = http.MaxBytesReader(w, r.Body, a.MaxEnvelope)
+		if err = r.ParseMultipartForm(a.MaxEnvelope); err == nil {
+			if name == "" {
+				name = r.FormValue("name")
+			}
+			file, header, fileErr := r.FormFile("file")
+			if fileErr == nil {
+				defer file.Close()
+				if name == "" {
+					name = header.Filename
+				}
+				body, err = io.ReadAll(file)
+			} else {
+				err = fileErr
+			}
+		}
+	} else {
+		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, a.MaxEnvelope))
+	}
+	if err != nil {
+		http.Error(w, "artifact too large or malformed", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if name == "" {
+		http.Error(w, "artifact name required", http.StatusBadRequest)
+		return
+	}
+	if err := a.Store.artifacts.Upload(projectID, release, r.URL.Query().Get("dist"), name, body); err != nil {
+		a.Logger.Warn("artifact rejected", "error", err, "project_id", projectID)
+		http.Error(w, "invalid source map", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true, "name": name, "release": release})
 }
 
 func (s *Store) ListIssues(projectID string) []Issue {
@@ -255,12 +354,17 @@ type exceptionValue struct {
 	Type       string `json:"type"`
 	Value      string `json:"value"`
 	Stacktrace struct {
-		Frames []struct {
-			Filename string `json:"filename"`
-			Function string `json:"function"`
-			InApp    bool   `json:"in_app"`
-		} `json:"frames"`
+		Frames []StackFrame `json:"frames"`
 	} `json:"stacktrace"`
+}
+
+type StackFrame struct {
+	Filename string `json:"filename,omitempty"`
+	AbsPath  string `json:"abs_path,omitempty"`
+	Function string `json:"function,omitempty"`
+	Lineno   int    `json:"lineno,omitempty"`
+	Colno    int    `json:"colno,omitempty"`
+	InApp    bool   `json:"in_app,omitempty"`
 }
 
 func decodeEvent(projectID string, payload []byte, now time.Time) (Event, error) {
@@ -294,6 +398,7 @@ func decodeEvent(projectID string, payload []byte, now time.Time) (Event, error)
 				event.Message = last.Value
 			}
 			event.Exception = encoded
+			event.Frames = append(event.Frames, last.Stacktrace.Frames...)
 			if len(last.Stacktrace.Frames) > 0 {
 				frame := last.Stacktrace.Frames[len(last.Stacktrace.Frames)-1]
 				event.Culprit = frame.Function + "@" + frame.Filename
@@ -324,6 +429,11 @@ func groupingHash(event Event) string {
 		var ex exceptionValue
 		if json.Unmarshal(event.Exception, &ex) == nil {
 			parts = append(parts, ex.Type)
+			if len(event.SymbolicatedFrames) > 0 {
+				frame := event.SymbolicatedFrames[len(event.SymbolicatedFrames)-1]
+				parts = append(parts, normalizePath(frame.Filename), frame.Function)
+				return shortHash(strings.Join(parts, "\x00"))
+			}
 			for i := len(ex.Stacktrace.Frames) - 1; i >= 0; i-- {
 				frame := ex.Stacktrace.Frames[i]
 				if frame.InApp || i == len(ex.Stacktrace.Frames)-1 {
