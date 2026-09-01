@@ -17,10 +17,16 @@ func NewRelay(upstream string, maxBody int64, relayToken string) http.Handler {
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			setCORSHeaders(w)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.URL.Path == "/health/live" {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
+		setCORSHeaders(w)
 		if !strings.HasPrefix(r.URL.Path, "/api/") || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return

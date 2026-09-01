@@ -47,6 +47,7 @@ func (a *ArtifactStore) SetBlobStore(blob BlobStore) {
 
 type SourceMap struct {
 	Version    int
+	DebugID    string
 	File       string
 	SourceRoot string
 	Sources    []string
@@ -109,6 +110,101 @@ func (a *ArtifactStore) Upload(projectID, release, dist, name string, body []byt
 		}
 	}
 	return nil
+}
+
+func (a *ArtifactStore) LookupDebugID(projectID, debugID, filename string, line, column int) (StackFrame, bool) {
+	debugID = strings.ToLower(strings.TrimSpace(debugID))
+	if debugID == "" {
+		return StackFrame{}, false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for key, sourceMap := range a.artifacts {
+		parts := strings.Split(key, "\x00")
+		if len(parts) == 4 && parts[0] == projectID && strings.ToLower(sourceMap.DebugID) == debugID {
+			return sourceMap.Map(filename, line, column)
+		}
+	}
+	if a.db != nil {
+		rows, err := a.db.Query(`SELECT release, dist, name, COALESCE(blob_key, ''), source_map FROM sentryx_artifacts WHERE project_id=$1`, projectID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var release, dist, name, blobKey string
+				var body []byte
+				if rows.Scan(&release, &dist, &name, &blobKey, &body) != nil {
+					continue
+				}
+				if blobKey != "" && a.blob != nil {
+					if externalBody, blobErr := a.blob.Get(context.Background(), blobKey); blobErr == nil {
+						body = externalBody
+					}
+				}
+				sourceMap, parseErr := parseSourceMap(body)
+				if parseErr == nil && strings.EqualFold(sourceMap.DebugID, debugID) {
+					return sourceMap.Map(filename, line, column)
+				}
+			}
+		}
+	}
+	return StackFrame{}, false
+}
+
+func (a *ArtifactStore) List(projectID, release string) []ArtifactInfo {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	result := make([]ArtifactInfo, 0)
+	for key := range a.artifacts {
+		parts := strings.Split(key, "\x00")
+		if len(parts) != 4 || (projectID != "" && parts[0] != projectID) || (release != "" && parts[1] != release) {
+			continue
+		}
+		result = append(result, ArtifactInfo{ProjectID: parts[0], Release: parts[1], Dist: parts[2], Name: parts[3]})
+	}
+	if a.db != nil {
+		rows, err := a.db.Query(`SELECT project_id, release, dist, name, sha256, COALESCE(blob_key, ''), octet_length(source_map), created_at FROM sentryx_artifacts WHERE ($1 = '' OR project_id=$1) AND ($2 = '' OR release=$2) ORDER BY created_at DESC`, projectID, release)
+		if err == nil {
+			defer rows.Close()
+			result = result[:0]
+			for rows.Next() {
+				var info ArtifactInfo
+				var size sql.NullInt64
+				if rows.Scan(&info.ProjectID, &info.Release, &info.Dist, &info.Name, &info.SHA256, &info.BlobKey, &size, &info.CreatedAt) == nil {
+					if size.Valid {
+						info.Size = int(size.Int64)
+					}
+					result = append(result, info)
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (a *ArtifactStore) Delete(projectID, release, dist, name string) bool {
+	normalizedName := normalizeArtifactName(name)
+	deleted := false
+	a.mu.Lock()
+	for _, candidate := range artifactCandidates(projectID, release, dist, normalizedName) {
+		if _, ok := a.artifacts[candidate]; ok {
+			delete(a.artifacts, candidate)
+			deleted = true
+		}
+	}
+	blob := a.blob
+	a.mu.Unlock()
+	if a.db != nil {
+		result, err := a.db.Exec(`DELETE FROM sentryx_artifacts WHERE project_id=$1 AND release=$2 AND dist=$3 AND name=$4`, projectID, release, dist, normalizedName)
+		if err == nil {
+			if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows > 0 {
+				deleted = true
+			}
+		}
+	}
+	// BlobStore intentionally has no Delete primitive yet. Metadata removal
+	// makes the artifact unreachable while keeping external cleanup recoverable.
+	_ = blob
+	return deleted
 }
 
 func (a *ArtifactStore) Lookup(projectID, release, dist, filename string, line, column int) (StackFrame, bool) {
@@ -235,6 +331,8 @@ func (m SourceMap) Map(filename string, line, column int) (StackFrame, bool) {
 func parseSourceMap(body []byte) (SourceMap, error) {
 	var wire struct {
 		Version    int      `json:"version"`
+		DebugID    string   `json:"debug_id"`
+		XDebugID   string   `json:"x_debug_id"`
 		File       string   `json:"file"`
 		SourceRoot string   `json:"sourceRoot"`
 		Sources    []string `json:"sources"`
@@ -251,7 +349,11 @@ func parseSourceMap(body []byte) (SourceMap, error) {
 	if err != nil {
 		return SourceMap{}, err
 	}
-	return SourceMap{Version: wire.Version, File: wire.File, SourceRoot: wire.SourceRoot, Sources: wire.Sources, Names: wire.Names, Lines: lines}, nil
+	debugID := wire.DebugID
+	if debugID == "" {
+		debugID = wire.XDebugID
+	}
+	return SourceMap{Version: wire.Version, DebugID: debugID, File: wire.File, SourceRoot: wire.SourceRoot, Sources: wire.Sources, Names: wire.Names, Lines: lines}, nil
 }
 
 const base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"

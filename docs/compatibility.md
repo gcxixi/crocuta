@@ -20,12 +20,12 @@
 | Item type | 首期 | 行为 |
 |---|---:|---|
 | `event` / `error` | 支持 | 解码、规范化、Source Map、分组、持久化 |
-| `client_report` | 部分 | 解析丢弃原因并记录指标，不创建事件 |
-| `transaction` / `span` | 不处理 | 可观测丢弃，不影响同 Envelope 的 error |
-| `replay_event` / `replay_recording` | 不处理 | 可观测丢弃 |
-| `session` / `sessions` | 不处理 | 可观测丢弃 |
-| `profile` / `profile_chunk` | 不处理 | 可观测丢弃 |
-| attachment/minidump | 不处理 | 首期限额内跳过，超限拒绝；后续原生阶段实现 |
+| `client_report` | 支持 | 解析丢弃原因并入库/查询，不创建错误事件 |
+| `transaction` / `span` | 接收 | 以版本化 StoredSignal 持久化，暂不提供性能分析 UI |
+| `replay_event` / `replay_recording` | 接收 | JSON 保留 payload；二进制写入 BlobStore |
+| `session` / `sessions` | 接收 | 以版本化 StoredSignal 持久化 |
+| `profile` / `profile_chunk` | 接收 | 以版本化 StoredSignal 持久化 |
+| attachment/minidump/native crash | 支持子集 | Attachment 元数据和内容可查询；native 二进制走 BlobStore，暂不做完整符号化 |
 
 ## 协议特性
 
@@ -41,7 +41,7 @@
 | custom fingerprint / `{{ default }}` | 支持 |
 | release/dist/environment | 支持 |
 | legacy release file Source Map 上传 | 支持 |
-| debug ID / artifact bundle | 首期后半段/下一小版本 |
+| debug ID / artifact bundle | debug ID 支持；artifact bundle 接收边界已预留 |
 | Sentry 管理 API 全兼容 | 不支持 |
 
 ## 必测场景

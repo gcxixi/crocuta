@@ -61,6 +61,16 @@
 
 进入任何候选流前必须有容量/用户需求证据，并先扩展兼容矩阵、数据保留和安全模型。
 
+## 当前实现状态（2026-09）
+
+P0/P1/P2 的协议与数据边界已经实现：
+
+- P0：Promise rejection 统一 exception/mechanism、User/Request/Breadcrumb、基础 PII 清洗、混合 Envelope、gzip/CORS、主流 SourceMap 的通用 artifact 匹配和 Debug ID 优先匹配。
+- P1：Client Report、Attachment（数据库/File/S3 BlobStore）、Release 创建/查询、Artifact 列举/删除。
+- P2：transaction/span、Replay、Session、Profile、Native Crash item 的版本化 StoredSignal 接收和持久化。
+
+后续 Phase 4 的重点从“能否接收”转向产品语义：Performance 聚合与查询、Replay 播放数据模型、Profile 分析、Native Crash Symbolicator，以及对应的保留策略、权限和 UI。
+
 ## 建议 Issue 拆分
 
 - Epic A：协议与 Relay
