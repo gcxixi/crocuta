@@ -65,6 +65,8 @@ func main() {
 	}
 	app.RelayToken = os.Getenv("SENTRYX_RELAY_TOKEN")
 	app.ArtifactToken = os.Getenv("SENTRYX_ARTIFACT_TOKEN")
+	app.APITokens = sentryx.ParseAPITokens(os.Getenv("SENTRYX_API_TOKENS"))
+	app.CurrentUserID = envOr("SENTRYX_CURRENT_USER_ID", "1")
 	app.ProjectKeys = sentryx.ParseProjectKeys(os.Getenv("SENTRYX_PROJECT_KEYS"))
 	if value := os.Getenv("SENTRYX_RATE_LIMIT_PER_MINUTE"); value != "" {
 		limit, err := strconv.Atoi(value)

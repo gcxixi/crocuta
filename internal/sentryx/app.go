@@ -214,11 +214,14 @@ func (s *Store) SetArtifactStore(artifacts *ArtifactStore) {
 type App struct {
 	Store         EventStore
 	Artifacts     *ArtifactStore
+	Control       ControlPlane
 	PII           PIIConfig
 	MaxEnvelope   int64
 	RelayToken    string
 	ArtifactToken string
 	ProjectKeys   map[string]map[string]struct{}
+	APITokens     map[string]string
+	CurrentUserID string
 	RateLimiter   *RateLimiter
 	Logger        *slog.Logger
 }
@@ -242,7 +245,11 @@ func NewApp(store EventStore) *App {
 	} else if artifactAware, ok := store.(interface{ SetArtifactStore(*ArtifactStore) }); ok {
 		artifactAware.SetArtifactStore(artifacts)
 	}
-	app := &App{Store: store, Artifacts: artifacts, PII: DefaultPIIConfig(), MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}
+	control := NewMemoryControlPlane()
+	if provider, ok := store.(ControlPlane); ok {
+		control = provider
+	}
+	app := &App{Store: store, Artifacts: artifacts, Control: control, PII: DefaultPIIConfig(), MaxEnvelope: DefaultMaxEnvelopeBytes, CurrentUserID: "1", Logger: slog.Default()}
 	app.SetPIIConfig(app.PII)
 	return app
 }
@@ -278,6 +285,10 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	setCORSHeaders(w)
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if a.isControlAPI(parts) {
+		a.handleControlAPI(w, r, parts)
+		return
+	}
 	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodGet {
 		projectID := r.URL.Query().Get("project")
 		writeJSON(w, http.StatusOK, a.Store.ListIssues(projectID))
@@ -372,6 +383,9 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid sentry key", http.StatusUnauthorized)
 		return
 	}
+	if a.Control != nil {
+		a.Control.EnsureProject(projectID)
+	}
 	if a.RateLimiter != nil {
 		bucket := projectID + ":" + key + ":" + requestClientKey(r.RemoteAddr)
 		if allowed, retryAfter := a.RateLimiter.Allow(bucket, time.Now().UTC()); !allowed {
@@ -412,7 +426,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Sentry-Auth, X-Sentry-Envelope, X-SentryX-Relay-Token")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Sentry-Auth, X-Sentry-Envelope, X-SentryX-Relay-Token, X-SentryX-Management-Token")
 	w.Header().Set("Access-Control-Max-Age", "600")
 }
 

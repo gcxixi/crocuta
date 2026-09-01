@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStoreIngestsContextClientReportAttachmentAndSignals(t *testing.T) {
@@ -147,6 +148,62 @@ func TestScrubEnvelopeCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestSentryControlPlaneAPI(t *testing.T) {
+	app := NewApp(nil)
+	app.APITokens = map[string]string{"management": "1"}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	do := func(method, endpoint, body string) (*http.Response, []byte) {
+		req, err := http.NewRequest(method, server.URL+endpoint, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer management")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, data
+	}
+	resp, body := do(http.MethodGet, "/api/0/organizations/", "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"slug":"default"`) {
+		t.Fatalf("organizations status=%d body=%s", resp.StatusCode, body)
+	}
+	resp, body = do(http.MethodPost, "/api/0/organizations/default/teams/", `{"name":"Frontend"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("team status=%d body=%s", resp.StatusCode, body)
+	}
+	var team Team
+	if err := json.Unmarshal(body, &team); err != nil || team.Slug != "frontend" {
+		t.Fatalf("team=%s err=%v", body, err)
+	}
+	resp, body = do(http.MethodPost, "/api/0/organizations/default/projects/", `{"name":"Web App","platform":"javascript"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("project status=%d body=%s", resp.StatusCode, body)
+	}
+	var project ControlProject
+	if err := json.Unmarshal(body, &project); err != nil || project.Slug != "web-app" || len(project.Keys) != 1 {
+		t.Fatalf("project=%s err=%v", body, err)
+	}
+	resp, _ = do(http.MethodPost, "/api/0/projects/default/"+project.Slug+"/teams/"+team.ID, "")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("project team status=%d", resp.StatusCode)
+	}
+	resp, body = do(http.MethodGet, "/api/0/projects/default/"+project.Slug, "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), team.ID) {
+		t.Fatalf("project get status=%d body=%s", resp.StatusCode, body)
+	}
+	resp, body = do(http.MethodGet, "/api/0/users/me", "")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"id":"1"`) {
+		t.Fatalf("user status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestRelayScrubsBeforeForwarding(t *testing.T) {
 	event := []byte(`{"event_id":"55555555555555555555555555555555","request":{"headers":{"Authorization":"Bearer relay-secret"}}}`)
 	envelope := testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(event))+`}`, event))
@@ -168,6 +225,39 @@ func TestRelayScrubsBeforeForwarding(t *testing.T) {
 	response.Body.Close()
 	if strings.Contains(string(forwarded), "relay-secret") || !strings.Contains(string(forwarded), "[Filtered]") {
 		t.Fatalf("relay forwarded unsanitized body: %q", forwarded)
+	}
+}
+
+func TestRelayMirrorsSentryEnvelopeWithoutBlockingPrimary(t *testing.T) {
+	event := []byte(`{"event_id":"66666666666666666666666666666666","message":"dual-write"}`)
+	envelope := testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(event))+`}`, event))
+	mirrorReceived := make(chan []byte, 1)
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mirrorReceived <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mirror.Close()
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"accepted":1}`))
+	}))
+	defer primary.Close()
+	relay := httptest.NewServer(NewRelayWithConfigAndMirror(primary.URL, mirror.URL, DefaultMaxEnvelopeBytes, "", "", DefaultPIIConfig()))
+	defer relay.Close()
+	request, _ := http.NewRequest(http.MethodPost, relay.URL+"/api/1/envelope?sentry_key=public", bytes.NewReader(envelope))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("primary status=%v err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	select {
+	case body := <-mirrorReceived:
+		if !strings.Contains(string(body), "dual-write") {
+			t.Fatalf("mirror body=%q", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror did not receive the envelope")
 	}
 }
 

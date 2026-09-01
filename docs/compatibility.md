@@ -42,7 +42,7 @@
 | release/dist/environment | 支持 |
 | legacy release file Source Map 上传 | 支持 |
 | debug ID / artifact bundle | debug ID 支持；artifact bundle 接收边界已预留 |
-| Sentry 管理 API 全兼容 | 不支持 |
+| Sentry 管理 API 全兼容 | 不支持（已实现 Organization/User/Team/Project/Project Key 最小子集，见 [控制面与双写迁移](control-plane.md)） |
 
 ## 必测场景
 

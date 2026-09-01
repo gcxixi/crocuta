@@ -25,6 +25,20 @@ func ParseProjectKeys(value string) map[string]map[string]struct{} {
 	return result
 }
 
+// ParseAPITokens parses the local management-token compatibility format
+// "token:user-id,token2:user-id". Tokens are only held in memory; the
+// PostgreSQL control-plane table is reserved for hashed tokens in production.
+func ParseAPITokens(value string) map[string]string {
+	result := make(map[string]string)
+	for _, entry := range strings.Split(value, ",") {
+		token, userID, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		if ok && token != "" {
+			result[token] = strings.TrimSpace(userID)
+		}
+	}
+	return result
+}
+
 func requestClientKey(remoteAddr string) string {
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		return host
