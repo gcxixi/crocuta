@@ -37,7 +37,8 @@ func (p *PostgresStore) LeaseJobs(ctx context.Context, limit int, lease time.Dur
 		    lease_until=now()+make_interval(secs => $2)
 		WHERE job.id IN (
 			SELECT id FROM sentryx_ingest_jobs
-			WHERE state='ready' OR (state='processing' AND lease_until < now())
+			WHERE (state='ready' AND available_at <= now())
+			   OR (state='processing' AND lease_until < now())
 			ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED
 		)
 		RETURNING job.id, job.project_id, job.payload, job.attempts`, limit, seconds)
