@@ -131,6 +131,7 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 		if err != nil {
 			continue
 		}
+		event = scrubEvent(event)
 		if p.artifacts != nil {
 			// Reuse the same symbolication semantics as the memory backend.
 			debugID := debugIDFromMeta(event.DebugMeta)
