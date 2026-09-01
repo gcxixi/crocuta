@@ -10,6 +10,24 @@ Sentry.init({
   tracesSampleRate: 0,
 });
 
+const baseURL = process.env.SENTRYX_BASE_URL;
+if (baseURL) {
+  const form = new FormData();
+  form.append("file", new Blob([JSON.stringify({
+    version: 3,
+    file: "app.min.js",
+    sources: ["src/app.ts"],
+    names: ["checkout"],
+    mappings: "AAAAA",
+  })], { type: "application/json" }), "app.min.js");
+  form.append("name", "app.min.js");
+  const upload = await fetch(`${baseURL}/api/0/projects/1/releases/sentryx-source-e2e%401.0.0/files/`, {
+    method: "POST",
+    body: form,
+  });
+  if (!upload.ok) throw new Error(`source map upload failed: ${upload.status}`);
+}
+
 Sentry.captureEvent({
   platform: "javascript",
   release: "sentryx-source-e2e@1.0.0",
