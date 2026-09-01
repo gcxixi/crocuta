@@ -5,3 +5,5 @@
 /tmp/
 /data/
 *.log
+ui/node_modules/
+ui/dist/

@@ -80,6 +80,15 @@ services:
     depends_on:
       - server
 
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    ports:
+      - "${SENTRYX_UI_PORT:-3000}:80"
+    depends_on:
+      - server
+
 volumes:
   sentryx-postgres:
   sentryx-blobs:
