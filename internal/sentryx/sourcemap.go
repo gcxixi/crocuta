@@ -78,18 +78,25 @@ func (a *ArtifactStore) Upload(projectID, release, dist, name string, body []byt
 	a.artifacts[key] = sourceMap
 	a.mu.Unlock()
 	if a.db != nil {
-		blobKey := ""
 		if a.blob != nil {
-			blobKey = artifactBlobKey(projectID, release, dist, normalizedName)
+			blobKey := artifactBlobKey(projectID, release, dist, normalizedName)
+			_, err = a.db.Exec(`
+				INSERT INTO sentryx_artifacts
+				  (project_id, release, dist, name, sha256, blob_key, source_map)
+				VALUES ($1, $2, $3, $4, $5, $6, NULL)
+				ON CONFLICT (project_id, release, dist, name)
+				DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=EXCLUDED.blob_key, source_map=NULL`,
+				projectID, release, dist, normalizedName, artifactDigest(body), blobKey)
+		} else {
+			_, err = a.db.Exec(`
+				INSERT INTO sentryx_artifacts
+				  (project_id, release, dist, name, sha256, blob_key, source_map)
+				VALUES ($1, $2, $3, $4, $5, NULL, $6)
+				ON CONFLICT (project_id, release, dist, name)
+				DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=NULL, source_map=EXCLUDED.source_map`,
+				projectID, release, dist, normalizedName, artifactDigest(body), body)
 		}
-		_, err = a.db.Exec(`
-			INSERT INTO sentryx_artifacts
-			  (project_id, release, dist, name, sha256, blob_key, source_map)
-			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), CASE WHEN $7 = '' THEN $8 ELSE NULL END)
-			ON CONFLICT (project_id, release, dist, name)
-			DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=EXCLUDED.blob_key, source_map=EXCLUDED.source_map`,
-			projectID, release, dist, normalizedName, artifactDigest(body), blobKey, blobKey, body)
-		if err != nil {
+		if err != nil && strings.Contains(err.Error(), `column "blob_key" of relation`) {
 			// Databases created before migration 002 do not have blob_key yet.
 			// Keep the legacy BYTEA path usable during a rolling upgrade.
 			_, err = a.db.Exec(`
