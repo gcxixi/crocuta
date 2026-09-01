@@ -16,6 +16,16 @@ services:
       timeout: 3s
       retries: 10
 
+  blob-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/sh", "-lc"]
+    command: ["mkdir -p /var/lib/sentryx/blobs && chown -R sentryx:sentryx /var/lib/sentryx/blobs"]
+    user: "0:0"
+    volumes:
+      - sentryx-blobs:/var/lib/sentryx/blobs
+
   server:
     build:
       context: .
@@ -37,6 +47,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      blob-init:
+        condition: service_completed_successfully
 
   relay:
     build:
