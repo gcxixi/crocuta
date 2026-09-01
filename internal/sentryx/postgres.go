@@ -17,6 +17,7 @@ import (
 type PostgresStore struct {
 	db        *sql.DB
 	artifacts *ArtifactStore
+	PII       PIIConfig
 	Async     bool
 }
 
@@ -29,12 +30,14 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		db.Close()
 		return nil, err
 	}
-	return &PostgresStore{db: db, artifacts: newArtifactStoreWithDB(db)}, nil
+	return &PostgresStore{db: db, artifacts: newArtifactStoreWithDB(db), PII: DefaultPIIConfig()}, nil
 }
 
 func (p *PostgresStore) Close() error { return p.db.Close() }
 
 func (p *PostgresStore) SetArtifactStore(artifacts *ArtifactStore) { p.artifacts = artifacts }
+
+func (p *PostgresStore) SetPIIConfig(config PIIConfig) { p.PII = config }
 
 func (p *PostgresStore) ArtifactStore() *ArtifactStore { return p.artifacts }
 
@@ -45,6 +48,11 @@ func (p *PostgresStore) SetBlobStore(blob BlobStore) {
 }
 
 func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (int, error) {
+	var err error
+	body, err = ScrubEnvelope(body, p.PII)
+	if err != nil {
+		return 0, err
+	}
 	if _, err := parseEnvelope(body); err != nil {
 		return 0, err
 	}
@@ -205,7 +213,7 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 
 func isExtendedSignalType(value string) bool {
 	switch value {
-	case "transaction", "span", "replay_event", "replay_recording", "profile", "profile_chunk", "session", "sessions", "minidump", "unreal_report", "applecrashreport":
+	case "log", "transaction", "span", "replay_event", "replay_recording", "profile", "profile_chunk", "session", "sessions", "minidump", "unreal_report", "applecrashreport":
 		return true
 	default:
 		return false

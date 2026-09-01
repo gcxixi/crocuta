@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -24,14 +26,16 @@ func TestStoreIngestsContextClientReportAttachmentAndSignals(t *testing.T) {
 	reportBody := []byte(`{"timestamp":"2026-09-01T00:00:00Z","discarded_events":[{"reason":"sample_rate","category":"error","quantity":2}]}`)
 	attachmentBody := []byte("console output")
 	signalBody := []byte(`{"transaction":"checkout","spans":[]}`)
+	logBody := []byte(`{"body":"password=secret","attributes":{"token":"abc"}}`)
 	body := testEnvelope(
 		envelopePart(`{"type":"event","length":`+itoa(len(eventBody))+`}`, eventBody),
 		envelopePart(`{"type":"client_report","length":`+itoa(len(reportBody))+`}`, reportBody),
 		envelopePart(`{"type":"attachment","length":`+itoa(len(attachmentBody)+0)+`,"filename":"console.log","content_type":"text/plain","event_id":"11111111111111111111111111111111"}`, attachmentBody),
 		envelopePart(`{"type":"transaction","length":`+itoa(len(signalBody))+`,"event_id":"22222222222222222222222222222222"}`, signalBody),
+		envelopePart(`{"type":"log","length":`+itoa(len(logBody))+`}`, logBody),
 	)
 	accepted, err := store.Ingest("1", "public", body)
-	if err != nil || accepted != 4 {
+	if err != nil || accepted != 5 {
 		t.Fatalf("accepted=%d err=%v", accepted, err)
 	}
 	events := store.ListEvents("1", "")
@@ -41,8 +45,11 @@ func TestStoreIngestsContextClientReportAttachmentAndSignals(t *testing.T) {
 	if events[0].Request == nil || events[0].Request.Headers["Authorization"] != "[Filtered]" {
 		t.Fatalf("request=%#v", events[0].Request)
 	}
-	if len(store.ListClientReports("1")) != 1 || len(store.ListAttachments("1", "11111111111111111111111111111111")) != 1 || len(store.ListSignals("1", "transaction")) != 1 {
+	if len(store.ListClientReports("1")) != 1 || len(store.ListAttachments("1", "11111111111111111111111111111111")) != 1 || len(store.ListSignals("1", "transaction")) != 1 || len(store.ListSignals("1", "log")) != 1 {
 		t.Fatalf("extended items missing")
+	}
+	if payload := store.ListSignals("1", "log")[0].Payload; strings.Contains(string(payload), "secret") || !strings.Contains(string(payload), "[Filtered]") {
+		t.Fatalf("log was not scrubbed: %q", payload)
 	}
 }
 
@@ -88,6 +95,80 @@ func TestGzipEnvelopeAndCORS(t *testing.T) {
 		t.Fatalf("cors status=%v err=%v", preflightResponse.StatusCode, err)
 	}
 	preflightResponse.Body.Close()
+}
+
+func TestScrubEnvelopeSupportsRulesTextAttachmentsAndSignals(t *testing.T) {
+	event := []byte(`{"event_id":"44444444444444444444444444444444","message":"card 4111 1111 1111 1111","extra":{"password":"secret","keep":"ok"},"request":{"headers":{"Authorization":"Bearer secret"},"query_string":"token=abc"},"user":{"ip_address":"203.0.113.9"}}`)
+	attachment := []byte("password=secret\ncard=4111 1111 1111 1111")
+	signal := []byte(`{"message":"token=signal"}`)
+	body := testEnvelope(
+		envelopePart(`{"type":"event","length":`+itoa(len(event))+`}`, event),
+		envelopePart(`{"type":"attachment","length":`+itoa(len(attachment))+`,"filename":"debug.log","content_type":"text/plain"}`, attachment),
+		envelopePart(`{"type":"log","length":`+itoa(len(signal))+`}`, signal),
+	)
+	config := DefaultPIIConfig()
+	config.Rules = []PIIRule{{ID: "keep-hash", Selector: "extra.keep", Action: "hash", Type: "anything"}}
+	cleaned, err := ScrubEnvelope(body, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := parseEnvelope(cleaned)
+	if err != nil || len(items) != 3 {
+		t.Fatalf("parse cleaned envelope: %v items=%d", err, len(items))
+	}
+	var cleanEvent map[string]any
+	if err := json.Unmarshal(items[0].Payload, &cleanEvent); err != nil {
+		t.Fatal(err)
+	}
+	if cleanEvent["message"] != "[Filtered]" || cleanEvent["extra"].(map[string]any)["password"] != "[Filtered]" {
+		t.Fatalf("event was not scrubbed: %#v", cleanEvent)
+	}
+	if cleanEvent["extra"].(map[string]any)["keep"] == "ok" {
+		t.Fatal("custom hash rule was not applied")
+	}
+	if meta, ok := cleanEvent["_meta"].(map[string]any); ok {
+		for key := range meta {
+			if strings.HasPrefix(key, "_meta.") {
+				t.Fatalf("scrub metadata was recursively scrubbed: %#v", meta)
+			}
+		}
+	}
+	if !strings.Contains(string(items[1].Payload), "[Filtered]") || !strings.Contains(string(items[2].Payload), "[Filtered]") {
+		t.Fatalf("text items were not scrubbed: %q %q", items[1].Payload, items[2].Payload)
+	}
+}
+
+func TestScrubEnvelopeCanBeDisabled(t *testing.T) {
+	event := []byte(`{"message":"password=secret"}`)
+	body := testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(event))+`}`, event))
+	cleaned, err := ScrubEnvelope(body, PIIConfig{Enabled: false})
+	if err != nil || string(cleaned) != string(body) {
+		t.Fatalf("disabled scrub changed body: err=%v body=%q", err, cleaned)
+	}
+}
+
+func TestRelayScrubsBeforeForwarding(t *testing.T) {
+	event := []byte(`{"event_id":"55555555555555555555555555555555","request":{"headers":{"Authorization":"Bearer relay-secret"}}}`)
+	envelope := testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(event))+`}`, event))
+	var forwarded []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"accepted":1}`))
+	}))
+	defer upstream.Close()
+	relay := httptest.NewServer(NewRelayWithConfig(upstream.URL, DefaultMaxEnvelopeBytes, "", DefaultPIIConfig()))
+	defer relay.Close()
+	request, _ := http.NewRequest(http.MethodPost, relay.URL+"/api/1/envelope?sentry_key=public", bytes.NewReader(envelope))
+	request.Header.Set("Content-Type", "application/x-sentry-envelope")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("relay status=%v err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	if strings.Contains(string(forwarded), "relay-secret") || !strings.Contains(string(forwarded), "[Filtered]") {
+		t.Fatalf("relay forwarded unsanitized body: %q", forwarded)
+	}
 }
 
 func envelopePart(header string, payload []byte) []byte {

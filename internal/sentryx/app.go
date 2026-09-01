@@ -167,6 +167,7 @@ type Issue struct {
 
 type Store struct {
 	mu               sync.RWMutex
+	PII              PIIConfig
 	events           map[string]Event
 	issues           map[string]*Issue
 	groupToID        map[string]string
@@ -199,8 +200,10 @@ type AttachmentReader interface {
 }
 
 func NewStore() *Store {
-	return &Store{events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string), artifacts: NewArtifactStore(), attachments: make(map[string]Attachment), attachmentBodies: make(map[string][]byte), signals: make(map[string]StoredSignal), releases: make(map[string]Release)}
+	return &Store{PII: DefaultPIIConfig(), events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string), artifacts: NewArtifactStore(), attachments: make(map[string]Attachment), attachmentBodies: make(map[string][]byte), signals: make(map[string]StoredSignal), releases: make(map[string]Release)}
 }
+
+func (s *Store) SetPIIConfig(config PIIConfig) { s.PII = config }
 
 func (s *Store) SetArtifactStore(artifacts *ArtifactStore) {
 	s.mu.Lock()
@@ -211,6 +214,7 @@ func (s *Store) SetArtifactStore(artifacts *ArtifactStore) {
 type App struct {
 	Store         EventStore
 	Artifacts     *ArtifactStore
+	PII           PIIConfig
 	MaxEnvelope   int64
 	RelayToken    string
 	ArtifactToken string
@@ -238,7 +242,18 @@ func NewApp(store EventStore) *App {
 	} else if artifactAware, ok := store.(interface{ SetArtifactStore(*ArtifactStore) }); ok {
 		artifactAware.SetArtifactStore(artifacts)
 	}
-	return &App{Store: store, Artifacts: artifacts, MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}
+	app := &App{Store: store, Artifacts: artifacts, PII: DefaultPIIConfig(), MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}
+	app.SetPIIConfig(app.PII)
+	return app
+}
+
+// SetPIIConfig updates both the HTTP ingress policy and any store that can
+// process envelopes directly (memory or PostgreSQL).
+func (a *App) SetPIIConfig(config PIIConfig) {
+	a.PII = config
+	if configurable, ok := a.Store.(interface{ SetPIIConfig(PIIConfig) }); ok {
+		configurable.SetPIIConfig(config)
+	}
 }
 
 func (a *App) Handler() http.Handler {
@@ -378,6 +393,12 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if parts[2] == "store" {
 		body = wrapStoreEvent(body)
 	}
+	body, err = ScrubEnvelope(body, a.PII)
+	if err != nil {
+		a.Logger.Warn("envelope PII scrub failed", "error", err, "project_id", projectID)
+		http.Error(w, "invalid envelope", http.StatusBadRequest)
+		return
+	}
 	accepted, err := a.Store.Ingest(projectID, key, body)
 	if err != nil {
 		a.Logger.Warn("envelope rejected", "error", err, "project_id", projectID)
@@ -447,6 +468,10 @@ func (a *App) validArtifactToken(r *http.Request) bool {
 }
 
 func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
+	body, err := ScrubEnvelope(body, s.PII)
+	if err != nil {
+		return 0, err
+	}
 	items, err := parseEnvelope(body)
 	if err != nil {
 		return 0, err
@@ -500,7 +525,7 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 				s.mu.Unlock()
 				accepted++
 			}
-		case "transaction", "span", "replay_event", "replay_recording", "profile", "profile_chunk", "session", "sessions", "minidump", "unreal_report", "applecrashreport":
+		case "log", "transaction", "span", "replay_event", "replay_recording", "profile", "profile_chunk", "session", "sessions", "minidump", "unreal_report", "applecrashreport":
 			if stored, err := s.storeSignal(projectID, item, now); err == nil {
 				s.mu.Lock()
 				s.signals[stored.ID] = stored
@@ -1070,6 +1095,10 @@ func scrubMap(value map[string]any) map[string]any {
 	}
 	result := make(map[string]any, len(value))
 	for key, item := range value {
+		if key == "_meta" {
+			result[key] = item
+			continue
+		}
 		if scrubKeyPattern.MatchString(key) {
 			result[key] = "[Filtered]"
 			continue

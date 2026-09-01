@@ -21,10 +21,10 @@ Sentry SDK
     |
     v
 sentryx-relay (Go)
-    |  流式校验、鉴权、限流、转发
+    |  流式校验、鉴权、限流、PII 清洗、转发
     v
 sentryx-server ingest API (Go)
-    |  原始 Envelope + 持久任务
+    |  入队前 PII 清洗 + 持久任务
     v
 PostgreSQL queue  ---> sentryx-server worker
                           |  规范化、PII 清洗、Source Map、分组
@@ -41,6 +41,7 @@ Server 是模块化单体，同一二进制支持 `api`、`worker`、`all` 三�
 - [UI API 契约](docs/ui-api.md)
 - [UI 技术方案（Ant Design）](docs/ui-technical-design.md)
 - [分阶段实施路线](docs/roadmap.md)
+- [PII 清洗设计](docs/pii.md)
 - [ADR-0001：模块化单体与 PostgreSQL 持久队列](docs/adr/0001-modular-monolith.md)
 - [ADR-0002：版本化 Issue 分组](docs/adr/0002-versioned-grouping.md)
 

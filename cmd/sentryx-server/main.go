@@ -20,6 +20,7 @@ func main() {
 		slog.Error("invalid server role", "role", *role)
 		os.Exit(2)
 	}
+	piiConfig := sentryx.PIIConfigFromEnv()
 	blobStore, err := sentryx.NewBlobStoreFromEnv()
 	if err != nil {
 		slog.Error("blob store configuration invalid", "error", err)
@@ -36,6 +37,7 @@ func main() {
 			os.Exit(1)
 		}
 		store = postgres
+		postgres.SetPIIConfig(piiConfig)
 		postgres.SetBlobStore(blobStore)
 		closeStore = postgres.Close
 		if *role == "api" || *role == "all" {
@@ -57,6 +59,7 @@ func main() {
 		return
 	}
 	app := sentryx.NewApp(store)
+	app.SetPIIConfig(piiConfig)
 	if blobStore != nil && store == nil {
 		app.Artifacts.SetBlobStore(blobStore)
 	}

@@ -54,14 +54,14 @@ SDK
   -> POST /api/{project_id}/envelope/ 或 /api/{project_id}/store/
 Relay
   -> 请求级限额、公共 DSN key 校验、解析 Envelope header
-  -> POST /internal/v1/envelopes（服务间认证、流式 body）
+  -> POST /internal/v1/envelopes（服务间认证、流式 body、边缘 PII 清洗）
 Server API
-  -> 再次校验 project/key、计算 payload checksum
-  -> 单事务写 ingest_jobs(payload BYTEA, metadata, state=ready)
+  -> 再次校验 project/key、解压和 PII 清洗
+  -> 单事务写 ingest_jobs(payload BYTEA, metadata, state=ready)，只保存清洗后的 Envelope
   -> 202/200
 Worker
   -> SELECT ... FOR UPDATE SKIP LOCKED 租约领取
-  -> item 路由 -> Canonical Error -> scrub -> source map -> grouping
+  -> item 路由 -> Canonical Error -> 防御性 scrub -> source map -> grouping
   -> 单事务写 event、group hash/issue 聚合，完成 job
 ```
 
