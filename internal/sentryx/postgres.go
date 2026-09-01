@@ -34,13 +34,28 @@ func (p *PostgresStore) Close() error { return p.db.Close() }
 
 func (p *PostgresStore) SetArtifactStore(artifacts *ArtifactStore) { p.artifacts = artifacts }
 
-func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (int, error) {
+func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (accepted int, err error) {
 	items, err := parseEnvelope(body)
 	if err != nil {
 		return 0, err
 	}
 	now := timeNowUTC()
-	accepted := 0
+	checksum := artifactDigest(body)
+	var jobID int64
+	if err := p.db.QueryRow(`
+		INSERT INTO sentryx_ingest_jobs
+		  (project_id, received_at, payload, checksum, state)
+		VALUES ($1, $2, $3, $4, 'processing')
+		RETURNING id`, projectID, now, body, checksum).Scan(&jobID); err != nil {
+		return 0, err
+	}
+	defer func() {
+		state := "completed"
+		if err != nil {
+			state = "ready"
+		}
+		_, _ = p.db.Exec(`UPDATE sentryx_ingest_jobs SET state=$1, completed_at=CASE WHEN $1='completed' THEN now() ELSE completed_at END WHERE id=$2`, state, jobID)
+	}()
 	for _, item := range items {
 		if item.Type != "event" && item.Type != "error" {
 			continue
