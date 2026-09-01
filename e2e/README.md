@@ -13,4 +13,4 @@ npm install
 npm run test:e2e
 ```
 
-E2E 断言包括 Relay 转发成功、Server 接收事件、事件按规范化内容聚合到同一个 Issue、Issue `count == 2`，以及上传 Source Map 后恢复 `src/app.ts`/`checkout` 原始 frame。当前测试故意使用内存实现；接入 PostgreSQL 后应保留同一套 SDK 测试并将服务替换为真实进程/Compose。
+E2E 断言包括 Relay 转发成功、Server 接收事件、事件按规范化内容聚合到同一个 Issue、Issue `count == 2`，以及上传 Source Map 后恢复 `src/app.ts`/`checkout` 原始 frame。默认测试使用内存实现以保持快速回归；PostgreSQL 后端已实现同一 Event/Issue/Artifact 接口，待 Docker daemon 可用后将同一套 SDK 测试替换为真实进程/Compose 运行。

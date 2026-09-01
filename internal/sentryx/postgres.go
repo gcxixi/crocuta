@@ -16,6 +16,7 @@ import (
 type PostgresStore struct {
 	db        *sql.DB
 	artifacts *ArtifactStore
+	Async     bool
 }
 
 func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
@@ -36,28 +37,48 @@ func (p *PostgresStore) SetArtifactStore(artifacts *ArtifactStore) { p.artifacts
 
 func (p *PostgresStore) ArtifactStore() *ArtifactStore { return p.artifacts }
 
-func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (accepted int, err error) {
+func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (int, error) {
+	if _, err := parseEnvelope(body); err != nil {
+		return 0, err
+	}
+	jobID, err := p.EnqueueEnvelope(projectID, body, p.Async)
+	if err != nil {
+		return 0, err
+	}
+	if p.Async {
+		return 1, nil
+	}
+	accepted, err := p.processPayload(projectID, body)
+	state := "completed"
+	if err != nil {
+		state = "ready"
+	}
+	_, _ = p.db.Exec(`UPDATE sentryx_ingest_jobs SET state=$1, completed_at=CASE WHEN $1='completed' THEN now() ELSE completed_at END WHERE id=$2`, state, jobID)
+	return accepted, err
+}
+
+func (p *PostgresStore) EnqueueEnvelope(projectID string, body []byte, ready bool) (int64, error) {
+	now := timeNowUTC()
+	state := "processing"
+	if ready {
+		state = "ready"
+	}
+	checksum := artifactDigest(body)
+	var jobID int64
+	err := p.db.QueryRow(`
+		INSERT INTO sentryx_ingest_jobs
+		  (project_id, received_at, payload, checksum, state)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id`, projectID, now, body, checksum, state).Scan(&jobID)
+	return jobID, err
+}
+
+func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted int, err error) {
 	items, err := parseEnvelope(body)
 	if err != nil {
 		return 0, err
 	}
 	now := timeNowUTC()
-	checksum := artifactDigest(body)
-	var jobID int64
-	if err := p.db.QueryRow(`
-		INSERT INTO sentryx_ingest_jobs
-		  (project_id, received_at, payload, checksum, state)
-		VALUES ($1, $2, $3, $4, 'processing')
-		RETURNING id`, projectID, now, body, checksum).Scan(&jobID); err != nil {
-		return 0, err
-	}
-	defer func() {
-		state := "completed"
-		if err != nil {
-			state = "ready"
-		}
-		_, _ = p.db.Exec(`UPDATE sentryx_ingest_jobs SET state=$1, completed_at=CASE WHEN $1='completed' THEN now() ELSE completed_at END WHERE id=$2`, state, jobID)
-	}()
 	for _, item := range items {
 		if item.Type != "event" && item.Type != "error" {
 			continue
