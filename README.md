@@ -12,7 +12,7 @@ SentryX 是一个以 Go 为统一技术栈、面向 Sentry SDK 协议兼容的�
 - 支持 Source Map 上传、匹配与符号化的最小闭环。
 - 支持事件去重、稳定分组、Issue 聚合与基础查询 API。
 - 已实现 P0/P1/P2 的协议接收和持久化边界：User/Request/Breadcrumb、gzip/CORS、混合 Envelope、Client Report、Attachment、Release/Artifact 管理，以及 transaction/span、Replay、Session、Profile、Native Crash item 的版本化 StoredSignal。
-- 扩展 item 目前提供查询/BlobStore 落盘能力，尚未提供 Performance/Replay 分析 UI、Native Crash 完整 Symbolicator、告警通知和全量 Sentry 管理 API；控制面已支持 Organization/User/Team/Project 的渐进迁移子集。
+- 扩展 item 目前提供查询/BlobStore 落盘能力，已提供 Ant Design 错误监控控制台；尚未提供 Performance/Replay 分析 UI、Native Crash 完整 Symbolicator、告警通知和全量 Sentry 管理 API；控制面已支持 Organization/User/Team/Project 的渐进迁移子集。
 
 ## 架构摘要
 
