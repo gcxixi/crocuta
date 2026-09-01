@@ -27,7 +27,7 @@ func TestNodeSDKThroughRelayAggregatesIssue(t *testing.T) {
 	script := filepath.Join(root, "node-sdk.mjs")
 	cmd := exec.Command("node", script)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ())
+	cmd.Env = os.Environ()
 	// The SDK DSN parser uses the public key before '@'; use a valid local DSN.
 	cmd.Env = append(cmd.Env, "SENTRYX_DSN=http://public@"+relay.URL[len("http://"):]+"/1")
 	output, err := cmd.CombinedOutput()
