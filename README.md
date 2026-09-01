@@ -67,4 +67,15 @@ testdata/sentry/
 
 ## 当前状态
 
-当前仓库完成了产品边界、兼容策略、总体架构、数据模型、分组算法、可靠性与演进路线设计；下一步按 `docs/roadmap.md` 的 Phase 0 建立 Go 工程骨架和 SDK 契约测试。
+已完成首个可运行的内存垂直切片：Go Relay、Go Server、Envelope/Store 接入、JavaScript Error 规范化、基础分组与 Issue 查询；Node.js 和 Browser 官方 Sentry SDK 的端到端测试均已通过。该切片用于快速验证协议和领域闭环，尚未替代方案中的 PostgreSQL 持久队列、Source Map、Release 管理和生产鉴权配置，后续按 `docs/roadmap.md` 推进。
+
+## 本地验证
+
+需要 Go、Node.js 和 npm：
+
+```bash
+npm install
+npm run test:e2e
+```
+
+测试会在进程内启动 Relay 与 Server，并让官方 `@sentry/node`、`@sentry/browser` SDK 将两个不同动态订单号的错误发送到 Relay，断言最终只有一个 Issue 且事件计数为 2。
