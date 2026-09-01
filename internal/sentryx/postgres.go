@@ -37,6 +37,12 @@ func (p *PostgresStore) SetArtifactStore(artifacts *ArtifactStore) { p.artifacts
 
 func (p *PostgresStore) ArtifactStore() *ArtifactStore { return p.artifacts }
 
+func (p *PostgresStore) SetBlobStore(blob BlobStore) {
+	if p.artifacts != nil {
+		p.artifacts.SetBlobStore(blob)
+	}
+}
+
 func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (int, error) {
 	if _, err := parseEnvelope(body); err != nil {
 		return 0, err

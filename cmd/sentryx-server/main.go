@@ -19,6 +19,11 @@ func main() {
 		slog.Error("invalid server role", "role", *role)
 		os.Exit(2)
 	}
+	blobStore, err := sentryx.NewBlobStoreFromEnv()
+	if err != nil {
+		slog.Error("blob store configuration invalid", "error", err)
+		os.Exit(2)
+	}
 	var store sentryx.EventStore
 	var closeStore func() error
 	if dsn := os.Getenv("SENTRYX_DATABASE_URL"); dsn != "" {
@@ -30,6 +35,7 @@ func main() {
 			os.Exit(1)
 		}
 		store = postgres
+		postgres.SetBlobStore(blobStore)
 		closeStore = postgres.Close
 		if *role == "api" || *role == "all" {
 			postgres.Async = true
@@ -50,6 +56,9 @@ func main() {
 		return
 	}
 	app := sentryx.NewApp(store)
+	if blobStore != nil && store == nil {
+		app.Artifacts.SetBlobStore(blobStore)
+	}
 	app.RelayToken = os.Getenv("SENTRYX_RELAY_TOKEN")
 	if closeStore != nil {
 		defer closeStore()

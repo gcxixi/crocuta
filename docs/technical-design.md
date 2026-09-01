@@ -197,7 +197,7 @@ React/Vue/Angular/TypeScript 生产错误通常来自压缩 bundle。没有 Sour
 - Release 创建/查询的最小 API。
 - 兼容 `sentry-cli releases files upload-sourcemaps` 所需的 legacy release file 上传、列举、删除/覆盖子集。
 - 解析 `release`、`dist`、`url-prefix`、`~` 路径和 `sourceMappingURL`。
-- Artifact 元数据存 PostgreSQL，压缩内容存 BlobStore，按 SHA-256 去重。
+- Artifact 元数据存 PostgreSQL，压缩内容存 BlobStore，按 SHA-256 去重。实现提供数据库 BYTEA 兼容模式、原子写入的文件 BlobStore 和基于 SigV4 的 S3 兼容 BlobStore；`migrations/002_blobstore.sql` 通过 `blob_key` 与可空 `source_map` 支持滚动迁移。
 - 下一小版本增加 debug ID/artifact bundle 接口；事件带 `debug_meta` 时优先 debug ID，之后才回退到 release/dist/URL。
 
 匹配顺序固定并可解释：`debug_id` -> `(project, release, dist, normalized abs_path)` -> release 无 dist -> sourceMappingURL。每次符号化记录 artifact ID、匹配策略和 symbolicator 版本。

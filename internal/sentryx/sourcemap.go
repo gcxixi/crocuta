@@ -1,6 +1,7 @@
 package sentryx
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -19,14 +20,29 @@ type ArtifactStore struct {
 	mu        sync.RWMutex
 	artifacts map[string]SourceMap
 	db        *sql.DB
+	blob      BlobStore
 }
 
 func NewArtifactStore() *ArtifactStore {
 	return &ArtifactStore{artifacts: make(map[string]SourceMap)}
 }
 
+func NewArtifactStoreWithBlob(blob BlobStore) *ArtifactStore {
+	return &ArtifactStore{artifacts: make(map[string]SourceMap), blob: blob}
+}
+
 func newArtifactStoreWithDB(db *sql.DB) *ArtifactStore {
 	return &ArtifactStore{artifacts: make(map[string]SourceMap), db: db}
+}
+
+func newArtifactStoreWithDBAndBlob(db *sql.DB, blob BlobStore) *ArtifactStore {
+	return &ArtifactStore{artifacts: make(map[string]SourceMap), db: db, blob: blob}
+}
+
+func (a *ArtifactStore) SetBlobStore(blob BlobStore) {
+	a.mu.Lock()
+	a.blob = blob
+	a.mu.Unlock()
 }
 
 type SourceMap struct {
@@ -51,27 +67,67 @@ func (a *ArtifactStore) Upload(projectID, release, dist, name string, body []byt
 	if err != nil {
 		return err
 	}
+	normalizedName := normalizeArtifactName(name)
+	if a.blob != nil {
+		if err := a.blob.Put(context.Background(), artifactBlobKey(projectID, release, dist, normalizedName), body); err != nil {
+			return err
+		}
+	}
 	key := artifactKey(projectID, release, dist, name)
 	a.mu.Lock()
 	a.artifacts[key] = sourceMap
 	a.mu.Unlock()
 	if a.db != nil {
+		blobKey := ""
+		if a.blob != nil {
+			blobKey = artifactBlobKey(projectID, release, dist, normalizedName)
+		}
 		_, err = a.db.Exec(`
 			INSERT INTO sentryx_artifacts
-			  (project_id, release, dist, name, sha256, source_map)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			  (project_id, release, dist, name, sha256, blob_key, source_map)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), CASE WHEN $7 = '' THEN $8 ELSE NULL END)
 			ON CONFLICT (project_id, release, dist, name)
-			DO UPDATE SET sha256=EXCLUDED.sha256, source_map=EXCLUDED.source_map`,
-			projectID, release, dist, normalizeArtifactName(name), artifactDigest(body), body)
+			DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=EXCLUDED.blob_key, source_map=EXCLUDED.source_map`,
+			projectID, release, dist, normalizedName, artifactDigest(body), blobKey, blobKey, body)
+		if err != nil {
+			// Databases created before migration 002 do not have blob_key yet.
+			// Keep the legacy BYTEA path usable during a rolling upgrade.
+			_, err = a.db.Exec(`
+				INSERT INTO sentryx_artifacts
+				  (project_id, release, dist, name, sha256, source_map)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (project_id, release, dist, name)
+				DO UPDATE SET sha256=EXCLUDED.sha256, source_map=EXCLUDED.source_map`,
+				projectID, release, dist, normalizedName, artifactDigest(body), body)
+		}
 	}
 	return nil
 }
 
 func (a *ArtifactStore) Lookup(projectID, release, dist, filename string, line, column int) (StackFrame, bool) {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 	for _, candidate := range artifactCandidates(projectID, release, dist, filename) {
 		if sourceMap, ok := a.artifacts[candidate]; ok {
+			a.mu.RUnlock()
+			return sourceMap.Map(filename, line, column)
+		}
+	}
+	blob := a.blob
+	a.mu.RUnlock()
+	for _, candidate := range artifactCandidates(projectID, release, dist, filename) {
+		if blob == nil {
+			break
+		}
+		parts := strings.Split(candidate, "\x00")
+		if len(parts) != 4 {
+			continue
+		}
+		body, err := blob.Get(context.Background(), artifactBlobKey(parts[0], parts[1], parts[2], parts[3]))
+		if err != nil {
+			continue
+		}
+		if sourceMap, err := parseSourceMap(body); err == nil {
+			a.cache(candidate, sourceMap)
 			return sourceMap.Map(filename, line, column)
 		}
 	}
@@ -81,21 +137,33 @@ func (a *ArtifactStore) Lookup(projectID, release, dist, filename string, line, 
 			if len(parts) != 4 {
 				continue
 			}
+			var blobKey sql.NullString
 			var body []byte
-			if err := a.db.QueryRow(`SELECT source_map FROM sentryx_artifacts WHERE project_id=$1 AND release=$2 AND dist=$3 AND name=$4`, parts[0], parts[1], parts[2], parts[3]).Scan(&body); err != nil {
-				continue
+			err := a.db.QueryRow(`SELECT blob_key, source_map FROM sentryx_artifacts WHERE project_id=$1 AND release=$2 AND dist=$3 AND name=$4`, parts[0], parts[1], parts[2], parts[3]).Scan(&blobKey, &body)
+			if err != nil {
+				// Legacy schema fallback before migration 002.
+				if legacyErr := a.db.QueryRow(`SELECT source_map FROM sentryx_artifacts WHERE project_id=$1 AND release=$2 AND dist=$3 AND name=$4`, parts[0], parts[1], parts[2], parts[3]).Scan(&body); legacyErr != nil {
+					continue
+				}
+			}
+			if blobKey.Valid && blob != nil {
+				if externalBody, blobErr := blob.Get(context.Background(), blobKey.String); blobErr == nil {
+					body = externalBody
+				}
 			}
 			if sourceMap, err := parseSourceMap(body); err == nil {
-				a.mu.RUnlock()
-				a.mu.Lock()
-				a.artifacts[candidate] = sourceMap
-				a.mu.Unlock()
-				a.mu.RLock()
+				a.cache(candidate, sourceMap)
 				return sourceMap.Map(filename, line, column)
 			}
 		}
 	}
 	return StackFrame{}, false
+}
+
+func (a *ArtifactStore) cache(key string, sourceMap SourceMap) {
+	a.mu.Lock()
+	a.artifacts[key] = sourceMap
+	a.mu.Unlock()
 }
 
 func artifactCandidates(projectID, release, dist, filename string) []string {
@@ -109,6 +177,17 @@ func artifactCandidates(projectID, release, dist, filename string) []string {
 
 func artifactKey(projectID, release, dist, name string) string {
 	return projectID + "\x00" + release + "\x00" + dist + "\x00" + normalizeArtifactName(name)
+}
+
+func artifactBlobKey(projectID, release, dist, name string) string {
+	return path.Join("sourcemaps", blobPathSegment(projectID), blobPathSegment(release), blobPathSegment(dist), blobPathSegment(normalizeArtifactName(name)))
+}
+
+func blobPathSegment(value string) string {
+	if value == "" {
+		return "_"
+	}
+	return url.PathEscape(value)
 }
 
 func normalizeArtifactName(value string) string {

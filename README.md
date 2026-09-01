@@ -67,7 +67,7 @@ testdata/sentry/
 
 ## 当前状态
 
-已完成首个可运行垂直切片：Go Relay、Go Server、Envelope/Store 接入、JavaScript Error 规范化、基础分组与 Issue 查询；Node.js 和 Browser 官方 Sentry SDK 的端到端测试均已通过。Source Map/Release 已具备内存 MVP，并由官方 Node SDK E2E 验证上传、匹配和符号化；PostgreSQL 后端已支持 ingest job、Event/Issue 和 Artifact 持久化，以及 `api/worker/all` 角色。真实 PostgreSQL Compose E2E、S3 BlobStore 和生产鉴权配置仍按 `docs/roadmap.md` 推进。
+已完成首个可运行垂直切片：Go Relay、Go Server、Envelope/Store 接入、JavaScript Error 规范化、基础分组与 Issue 查询；Node.js、Browser、React、Vue、Angular 官方 Sentry SDK 的端到端测试均已通过。Source Map/Release 已具备内存 MVP，并由官方 SDK E2E 验证上传、匹配和符号化；PostgreSQL 后端已支持 ingest job、Event/Issue 和 Artifact 持久化，以及 `api/worker/all` 角色。ArtifactStore 现在支持数据库兼容模式、文件 BlobStore 和 S3 兼容 BlobStore；生产鉴权、限流和生命周期策略仍按 `docs/roadmap.md` 推进。
 
 ## 本地验证
 
@@ -81,5 +81,7 @@ npm run test:e2e
 测试会在进程内启动 Relay 与 Server，并让官方 `@sentry/node`、`@sentry/browser` SDK 将两个不同动态订单号的错误发送到 Relay，断言最终只有一个 Issue 且事件计数为 2。
 
 PostgreSQL 运行模式：先执行 `migrations/001_init.sql`，再设置 `SENTRYX_DATABASE_URL`。`sentryx-server -role=all` 同时提供 API 和 Worker；生产环境可拆为 `-role=api` 与 `-role=worker` 两组实例。
+
+Source Map 存储通过 `SENTRYX_BLOB_BACKEND` 选择：`database`（默认，兼容旧 schema）、`file`（设置 `SENTRYX_BLOB_DIR`）或 `s3`。S3 模式需要 `SENTRYX_S3_ENDPOINT`、`SENTRYX_S3_ACCESS_KEY`、`SENTRYX_S3_SECRET_KEY`、`SENTRYX_S3_BUCKET`，可选 `SENTRYX_S3_REGION`、`SENTRYX_S3_PREFIX` 和 `SENTRYX_S3_SECURE`。切换已有 PostgreSQL 数据库前先执行 `migrations/002_blobstore.sql`；旧 Worker 可在滚动升级期间继续读取 BYTEA。
 
 NUC 真实 SDK E2E 的启动、执行、数据库核对和重启恢复步骤见 [`docs/e2e-nuc.md`](docs/e2e-nuc.md)。

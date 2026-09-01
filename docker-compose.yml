@@ -23,6 +23,17 @@ services:
     command: ["/sentryx-server", "-addr", ":8080"]
     environment:
       SENTRYX_DATABASE_URL: postgres://sentryx:sentryx-dev-only@postgres:5432/sentryx?sslmode=disable
+      SENTRYX_BLOB_BACKEND: ${SENTRYX_BLOB_BACKEND:-database}
+      SENTRYX_BLOB_DIR: ${SENTRYX_BLOB_DIR:-/var/lib/sentryx/blobs}
+      SENTRYX_S3_ENDPOINT: ${SENTRYX_S3_ENDPOINT:-}
+      SENTRYX_S3_ACCESS_KEY: ${SENTRYX_S3_ACCESS_KEY:-}
+      SENTRYX_S3_SECRET_KEY: ${SENTRYX_S3_SECRET_KEY:-}
+      SENTRYX_S3_REGION: ${SENTRYX_S3_REGION:-us-east-1}
+      SENTRYX_S3_BUCKET: ${SENTRYX_S3_BUCKET:-sentryx}
+      SENTRYX_S3_PREFIX: ${SENTRYX_S3_PREFIX:-sentryx}
+      SENTRYX_S3_SECURE: ${SENTRYX_S3_SECURE:-true}
+    volumes:
+      - sentryx-blobs:/var/lib/sentryx/blobs
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,3 +50,4 @@ services:
 
 volumes:
   sentryx-postgres:
+  sentryx-blobs:
