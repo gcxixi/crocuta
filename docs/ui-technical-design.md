@@ -1,6 +1,6 @@
 # SentryX UI 技术方案（Ant Design）
 
-状态：Draft for implementation  
+状态：已实现第一版基线；分页、权限和高级分析继续演进  
 前端栈：React + TypeScript + Vite + Ant Design 5.x + React Router 6 + TanStack Query
 
 ## 1. 目标
@@ -20,7 +20,7 @@ Sentry 开源前端的入口包含 bootstrap、运行时配置、React 应用初
 
 第一阶段不实现：
 
-- Sentry 组织、团队、邀请和完整 RBAC；
+- Sentry 邀请和完整 RBAC（基础 Organization/Team/Project 控制面已由 Go API 提供）；
 - Discover、Alert、Dashboard、通知集成；
 - Performance/Replay/Profile 的完整分析器；
 - Native Crash 完整符号化；
@@ -154,6 +154,8 @@ IssueTable
 | Environment | `Tag` | 过滤 |
 
 当前 `/api/0/issues` 没有服务端过滤和分页；UI 实现可以先使用小数据集，但生产版本必须切换到 [UI API v1 分页接口](ui-api.md#41-分页-issue-列表)。不要把全量列表无限缓存到 React state。
+
+当前仓库的 `ui/` 已提供可运行的 React + TypeScript + Vite + Ant Design 基线，实现 Issues、Issue 详情、Releases、Signals、Client Reports、Project Settings、项目切换和 Nginx API 代理。它消费现有 `/api/0` 接口，不改变 SDK 上报协议。
 
 ### 6.2 IssueDetailPage
 

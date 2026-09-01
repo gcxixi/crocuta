@@ -1,13 +1,13 @@
 # SentryX UI API 契约
 
-状态：Draft for UI implementation  
+状态：现有 API 与第一版 UI 已实现；分页和高级管理接口仍按 v1 演进  
 目标：为基于 Ant Design 的 SentryX 控制台提供稳定、可分页、可演进的 API 契约。
 
 ## 1. 适用范围
 
 本文分为两层：
 
-1. **现有 API**：当前 Go Server 已提供，前端可以直接接入。
+1. **现有 API**：当前 Go Server 已提供，`ui/` 前端已经直接接入。
 2. **UI API v1 扩展**：为了实现接近 Sentry 开源 UI 的 Issue 列表、Issue 详情、Release 管理和过滤能力，需要补充的接口。文中明确标注 `planned`，不能在前端提前假定已存在。
 
 设计参考：Sentry 开源前端的入口负责 bootstrap、初始化配置和 React Router；路由位于 `static/app/routes.tsx`，页面按路由懒加载。见 [Sentry frontend entrypoint](https://github.com/getsentry/sentry/blob/master/static/app/index.tsx) 和 [Sentry frontend conventions](https://github.com/getsentry/sentry/blob/master/static/AGENTS.md)。

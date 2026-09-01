@@ -14,6 +14,15 @@ docker compose ps
 curl -fsS http://127.0.0.1:8081/health/live
 ```
 
+启动 Ant Design 控制台（若 NUC 的 3000 端口已占用，可覆盖为其他端口）：
+
+```bash
+SENTRYX_POSTGRES_PORT=15432 SENTRYX_UI_PORT=33000 docker compose up -d --build ui
+curl -fsS http://127.0.0.1:33000/
+```
+
+浏览器访问 `http://<nuc>:33000/`；UI 通过同源 Nginx 代理请求 `/api/0`。
+
 ## 运行官方 SDK
 
 NUC 不需要安装 Node；测试依赖在一次性 Node 容器中安装：

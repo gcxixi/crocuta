@@ -15,6 +15,8 @@ SENTRYX_MIRROR_RELAY_TOKEN: ""
 
 建议先把 SentryX 配置为主写、官方 Sentry 为 mirror，对比 Issue 数量与 SDK 响应；稳定后反向切换，最后关闭 mirror。
 
+Compose 还提供 `ui` 服务，默认暴露 `SENTRYX_UI_PORT`（默认 `3000`）。UI 使用 Ant Design，通过 Nginx 同源代理 `/api/0`，不会把 SDK DSN 或私有上报协议改成 SentryX 专用格式。
+
 ## 控制面 API
 
 管理 API 使用 `Authorization: Bearer <token>`，兼容旧部署的 `X-SentryX-Management-Token`。本地开发在未配置 token 时保持开放；生产应设置 `SENTRYX_API_TOKENS=token:user-id`。
