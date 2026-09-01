@@ -1,8 +1,7 @@
 // Smoke-test the official framework SDK entry points without requiring a
 // framework build. Each package must still initialize and emit a normal
 // JavaScript error through the same transport contract.
-const dsn = process.env.SENTRYX_DSN;
-if (!dsn) throw new Error("SENTRYX_DSN is required");
+const dsn = process.env.SENTRYX_DSN || "http://public@127.0.0.1:8081/1";
 
 const common = {
   dsn,

@@ -139,7 +139,7 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 		if err != nil {
 			continue
 		}
-		event = scrubEvent(event)
+		event = scrubEventWithConfig(event, p.PII)
 		if p.artifacts != nil {
 			// Reuse the same symbolication semantics as the memory backend.
 			debugID := debugIDFromMeta(event.DebugMeta)
@@ -163,16 +163,31 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			}
 		}
 		groupHash := groupingHash(event)
+		issueID := shortHash(projectID + ":" + groupHash)
+		event.IssueID = issueID
 		tx, err := p.db.BeginTx(context.Background(), nil)
 		if err != nil {
 			return accepted, err
 		}
+		var returnedIssueID string
+		err = tx.QueryRow(`
+			INSERT INTO sentryx_issues
+			  (id, project_id, title, level, count, first_seen, last_seen, latest_event_id, grouping_version, group_hash)
+			VALUES ($1, $2, $3, $4, 1, $5, $5, $6, 1, $7)
+			ON CONFLICT (project_id, grouping_version, group_hash)
+			DO UPDATE SET count = sentryx_issues.count + 1,
+			  last_seen = EXCLUDED.last_seen, latest_event_id = EXCLUDED.latest_event_id
+			RETURNING id`, issueID, projectID, event.Title, event.Level, now, event.EventID, groupHash).Scan(&returnedIssueID)
+		if err != nil {
+			tx.Rollback()
+			return accepted, err
+		}
 		result, err := tx.Exec(`
 			INSERT INTO sentryx_events
-			  (project_id, event_id, occurred_at, received_at, canonical_json)
-			VALUES ($1, $2, $3, $4, $5)
+			  (project_id, event_id, issue_id, occurred_at, received_at, canonical_json)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (project_id, event_id) DO NOTHING`,
-			projectID, event.EventID, event.OccurredAt, event.ReceivedAt, mustJSON(event))
+			projectID, event.EventID, issueID, event.OccurredAt, event.ReceivedAt, mustJSON(event))
 		if err != nil {
 			tx.Rollback()
 			return accepted, err
@@ -184,24 +199,6 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 				return accepted, err
 			}
 			continue
-		}
-		var issueID string
-		err = tx.QueryRow(`
-			INSERT INTO sentryx_issues
-			  (id, project_id, title, level, count, first_seen, last_seen, latest_event_id, grouping_version, group_hash)
-			VALUES ($1, $2, $3, $4, 1, $5, $5, $6, 1, $7)
-			ON CONFLICT (project_id, grouping_version, group_hash)
-			DO UPDATE SET count = sentryx_issues.count + 1,
-			  last_seen = EXCLUDED.last_seen, latest_event_id = EXCLUDED.latest_event_id
-			RETURNING id`, shortHash(projectID+":"+groupHash), projectID, event.Title, event.Level, now, event.EventID, groupHash).Scan(&issueID)
-		if err != nil {
-			tx.Rollback()
-			return accepted, err
-		}
-		event.IssueID = issueID
-		if _, err = tx.Exec(`UPDATE sentryx_events SET issue_id=$1, canonical_json=$2 WHERE project_id=$3 AND event_id=$4`, issueID, mustJSON(event), projectID, event.EventID); err != nil {
-			tx.Rollback()
-			return accepted, err
 		}
 		if err := tx.Commit(); err != nil {
 			return accepted, err

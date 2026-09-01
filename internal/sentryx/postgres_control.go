@@ -97,19 +97,21 @@ func (p *PostgresStore) ListProjects(orgRef string) []ControlProject {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	result := make([]ControlProject, 0)
 	for rows.Next() {
 		var project ControlProject
 		project.OrganizationID = orgID
 		if rows.Scan(&project.ID, &project.Slug, &project.Name, &project.Platform, &project.DateCreated) == nil {
 			project.IsMember = true
-			project.Teams = p.ListProjectTeams(orgID, project.ID)
-			project.Keys = p.projectKeys(project.ID)
-			if len(project.Teams) > 0 {
-				project.Team = &project.Teams[0]
-			}
 			result = append(result, project)
+		}
+	}
+	rows.Close()
+	for i := range result {
+		result[i].Teams = p.ListProjectTeams(orgID, result[i].ID)
+		result[i].Keys = p.projectKeys(result[i].ID)
+		if len(result[i].Teams) > 0 {
+			result[i].Team = &result[i].Teams[0]
 		}
 	}
 	return result

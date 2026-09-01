@@ -46,26 +46,48 @@ func requestClientKey(remoteAddr string) string {
 	return remoteAddr
 }
 
+const defaultMaxRateLimiterEntries = 10000
+
 type rateWindow struct {
 	start time.Time
 	count int
 }
 
-// RateLimiter is a bounded in-process fixed window limiter. It is deliberately
-// local and approximate; deployments needing strict global quotas can replace
-// this boundary with a shared implementation later.
+// RateLimiter is a bounded in-process fixed window limiter with automatic
+// TTL cleanup and maximum capacity protection against memory leaks.
 type RateLimiter struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
-	entries map[string]rateWindow
+	mu          sync.Mutex
+	limit       int
+	window      time.Duration
+	maxEntries  int
+	lastCleanup time.Time
+	entries     map[string]rateWindow
 }
 
 func NewRateLimiter(limit int) *RateLimiter {
 	if limit <= 0 {
 		return nil
 	}
-	return &RateLimiter{limit: limit, window: time.Minute, entries: make(map[string]rateWindow)}
+	return &RateLimiter{
+		limit:       limit,
+		window:      time.Minute,
+		maxEntries:  defaultMaxRateLimiterEntries,
+		lastCleanup: time.Now(),
+		entries:     make(map[string]rateWindow),
+	}
+}
+
+func (r *RateLimiter) cleanup(now time.Time) {
+	r.lastCleanup = now
+	for k, v := range r.entries {
+		if now.Sub(v.start) >= r.window {
+			delete(r.entries, k)
+		}
+	}
+	if len(r.entries) >= r.maxEntries {
+		// If still over capacity after removing expired windows, clear entries to prevent OOM
+		r.entries = make(map[string]rateWindow)
+	}
 }
 
 func (r *RateLimiter) Allow(bucket string, now time.Time) (bool, int) {
@@ -74,6 +96,9 @@ func (r *RateLimiter) Allow(bucket string, now time.Time) (bool, int) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if now.Sub(r.lastCleanup) >= r.window || len(r.entries) >= r.maxEntries {
+		r.cleanup(now)
+	}
 	entry := r.entries[bucket]
 	if entry.start.IsZero() || now.Sub(entry.start) >= r.window {
 		entry = rateWindow{start: now}

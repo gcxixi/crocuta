@@ -1,7 +1,6 @@
 import * as Sentry from "@sentry/node";
 
-const dsn = process.env.SENTRYX_DSN;
-if (!dsn) throw new Error("SENTRYX_DSN is required");
+const dsn = process.env.SENTRYX_DSN || "http://public@127.0.0.1:8081/1";
 
 Sentry.init({
   dsn,

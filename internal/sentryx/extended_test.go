@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,4 +328,118 @@ func itoa(value int) string {
 		value /= 10
 	}
 	return string(result)
+}
+
+func TestRateLimiterBoundedMemoryAndCleanup(t *testing.T) {
+	limiter := NewRateLimiter(10)
+	if limiter == nil {
+		t.Fatal("expected non-nil rate limiter")
+	}
+	now := time.Now().UTC()
+	// Insert 15,000 unique buckets (exceeding defaultMaxRateLimiterEntries)
+	for i := 0; i < 15000; i++ {
+		bucket := "bucket:" + strconv.Itoa(i)
+		limiter.Allow(bucket, now)
+	}
+	limiter.mu.Lock()
+	entriesCount := len(limiter.entries)
+	limiter.mu.Unlock()
+	if entriesCount > defaultMaxRateLimiterEntries {
+		t.Fatalf("entries count = %d, exceeded max limit %d", entriesCount, defaultMaxRateLimiterEntries)
+	}
+
+	// Advance time past the 1 minute window
+	later := now.Add(2 * time.Minute)
+	limiter.Allow("new_bucket", later)
+
+	limiter.mu.Lock()
+	entriesAfterCleanup := len(limiter.entries)
+	limiter.mu.Unlock()
+	if entriesAfterCleanup > 10 {
+		t.Fatalf("entries count after cleanup = %d, want <= 10", entriesAfterCleanup)
+	}
+}
+
+func TestCORSSupportsAllMethods(t *testing.T) {
+	app := NewApp(nil)
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	req, _ := http.NewRequest(http.MethodOptions, server.URL+"/api/0/projects/1/releases", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	methods := resp.Header.Get("Access-Control-Allow-Methods")
+	for _, expectedMethod := range []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"} {
+		if !strings.Contains(methods, expectedMethod) {
+			t.Fatalf("CORS methods %q missing %q", methods, expectedMethod)
+		}
+	}
+}
+
+func TestPIIScrubEventSafeFieldsAndSecretPrecompilation(t *testing.T) {
+	config := PIIConfig{
+		Enabled:          true,
+		ScrubDefaults:    true,
+		ScrubIPAddresses: true,
+		SafeFields:       []string{"safe_token", "allowed_password_field"},
+	}
+	event := Event{
+		EventID: "55555555555555555555555555555555",
+		User:    &User{ID: "u-1", IPAddress: "192.168.1.1"},
+		Request: &Request{
+			Headers:     map[string]string{"Authorization": "Bearer secret-val", "Safe_Token": "unfiltered"},
+			QueryString: "token=12345&safe_token=kept",
+		},
+		Extra: map[string]any{
+			"password":               "secret123",
+			"safe_token":             "keep-me",
+			"allowed_password_field": "keep-this-too",
+		},
+	}
+
+	scrubbed := scrubEventWithConfig(event, config)
+	if scrubbed.User.IPAddress != "[Filtered]" {
+		t.Fatalf("expected IP address to be filtered, got %q", scrubbed.User.IPAddress)
+	}
+	if scrubbed.Request.Headers["Authorization"] != "[Filtered]" {
+		t.Fatalf("expected Authorization header to be filtered, got %q", scrubbed.Request.Headers["Authorization"])
+	}
+	if scrubbed.Request.Headers["Safe_Token"] != "unfiltered" {
+		t.Fatalf("expected Safe_Token header to be preserved, got %q", scrubbed.Request.Headers["Safe_Token"])
+	}
+	if scrubbed.Extra["password"] != "[Filtered]" {
+		t.Fatalf("expected password in Extra to be filtered, got %v", scrubbed.Extra["password"])
+	}
+	if scrubbed.Extra["safe_token"] != "keep-me" {
+		t.Fatalf("expected safe_token in Extra to be preserved, got %v", scrubbed.Extra["safe_token"])
+	}
+	if scrubbed.Extra["allowed_password_field"] != "keep-this-too" {
+		t.Fatalf("expected allowed_password_field to be preserved, got %v", scrubbed.Extra["allowed_password_field"])
+	}
+}
+
+func TestArtifactStoreDebugIDLookupAndCaching(t *testing.T) {
+	store := NewArtifactStore()
+	mapBody := `{"version":3,"debug_id":"dbg-1234-abcd","file":"app.min.js","sources":["src/main.ts"],"names":["handlePayment"],"mappings":"AAAAA"}`
+	err := store.Upload("1", "v1.0.0", "", "app.min.js", []byte(mapBody))
+	if err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	frame, ok := store.LookupDebugID("1", "dbg-1234-abcd", "app.min.js", 1, 0)
+	if !ok {
+		t.Fatal("expected debug_id lookup to succeed")
+	}
+	if frame.Filename != "src/main.ts" || frame.Function != "handlePayment" {
+		t.Fatalf("unexpected frame: %#v", frame)
+	}
+
+	// Case-insensitive test
+	frameUpper, okUpper := store.LookupDebugID("1", "DBG-1234-ABCD", "app.min.js", 1, 0)
+	if !okUpper || frameUpper.Function != "handlePayment" {
+		t.Fatalf("expected case-insensitive lookup to succeed, got %#v", frameUpper)
+	}
 }

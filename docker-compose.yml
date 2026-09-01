@@ -31,6 +31,8 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["/sentryx-server", "-addr", ":8080"]
+    ports:
+      - "${SENTRYX_SERVER_PORT:-18080}:8080"
     environment:
       SENTRYX_DATABASE_URL: postgres://sentryx:sentryx-dev-only@postgres:5432/sentryx?sslmode=disable
       SENTRYX_BLOB_BACKEND: ${SENTRYX_BLOB_BACKEND:-database}

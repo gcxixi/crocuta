@@ -427,7 +427,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Sentry-Auth, X-Sentry-Envelope, X-SentryX-Relay-Token, X-SentryX-Management-Token")
 	w.Header().Set("Access-Control-Max-Age", "600")
 }
@@ -504,7 +504,7 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 			if event.EventID == "" && item.EventID != "" {
 				event.EventID = item.EventID
 			}
-			event = scrubEvent(event)
+			event = scrubEventWithConfig(event, s.PII)
 			s.symbolicate(&event)
 			groupHash := groupingHash(event)
 			s.mu.Lock()
@@ -937,12 +937,15 @@ type exceptionValue struct {
 }
 
 type StackFrame struct {
-	Filename string `json:"filename,omitempty"`
-	AbsPath  string `json:"abs_path,omitempty"`
-	Function string `json:"function,omitempty"`
-	Lineno   int    `json:"lineno,omitempty"`
-	Colno    int    `json:"colno,omitempty"`
-	InApp    bool   `json:"in_app,omitempty"`
+	Filename    string   `json:"filename,omitempty"`
+	AbsPath     string   `json:"abs_path,omitempty"`
+	Function    string   `json:"function,omitempty"`
+	Lineno      int      `json:"lineno,omitempty"`
+	Colno       int      `json:"colno,omitempty"`
+	InApp       bool     `json:"in_app,omitempty"`
+	ContextLine string   `json:"context_line,omitempty"`
+	PreContext  []string `json:"pre_context,omitempty"`
+	PostContext []string `json:"post_context,omitempty"`
 }
 
 func decodeEvent(projectID string, payload []byte, now time.Time) (Event, error) {
@@ -1081,31 +1084,52 @@ func stringMapValue(value any) map[string]string {
 	return result
 }
 
-var scrubKeyPattern = regexp.MustCompile(`(?i)(password|passwd|secret|token|authorization|cookie|api[_-]?key|private[_-]?key)`)
+var (
+	scrubKeyPattern    = regexp.MustCompile(`(?i)(password|passwd|secret|token|authorization|cookie|api[_-]?key|private[_-]?key)`)
+	scrubSecretPattern = regexp.MustCompile(`(?i)(bearer\s+|token=|password=)[^\s&]+`)
+)
 
 func scrubEvent(event Event) Event {
-	event.Raw = scrubMap(event.Raw)
-	if event.User != nil {
+	return scrubEventWithConfig(event, DefaultPIIConfig())
+}
+
+func scrubEventWithConfig(event Event, config PIIConfig) Event {
+	if !config.Enabled {
+		return event
+	}
+	safe := make(map[string]struct{}, len(config.SafeFields))
+	for _, field := range config.SafeFields {
+		safe[strings.ToLower(strings.TrimSpace(field))] = struct{}{}
+	}
+	event.Raw = scrubMapWithSafe(event.Raw, safe)
+	if event.User != nil && config.ScrubIPAddresses {
 		event.User.IPAddress = "[Filtered]"
 	}
 	if event.Request != nil {
 		for key := range event.Request.Headers {
+			if _, isSafe := safe[strings.ToLower(key)]; isSafe {
+				continue
+			}
 			if scrubKeyPattern.MatchString(key) {
 				event.Request.Headers[key] = "[Filtered]"
 			}
 		}
 		event.Request.QueryString = scrubString(event.Request.QueryString)
-		event.Request.Data = scrubValue(event.Request.Data)
+		event.Request.Data = scrubValueWithSafe(event.Request.Data, safe)
 	}
-	event.Extra = scrubMap(event.Extra)
-	event.Contexts = scrubMap(event.Contexts)
+	event.Extra = scrubMapWithSafe(event.Extra, safe)
+	event.Contexts = scrubMapWithSafe(event.Contexts, safe)
 	for index := range event.Breadcrumbs {
-		event.Breadcrumbs[index].Data = scrubMap(event.Breadcrumbs[index].Data)
+		event.Breadcrumbs[index].Data = scrubMapWithSafe(event.Breadcrumbs[index].Data, safe)
 	}
 	return event
 }
 
 func scrubMap(value map[string]any) map[string]any {
+	return scrubMapWithSafe(value, nil)
+}
+
+func scrubMapWithSafe(value map[string]any, safe map[string]struct{}) map[string]any {
 	if value == nil {
 		return nil
 	}
@@ -1115,23 +1139,31 @@ func scrubMap(value map[string]any) map[string]any {
 			result[key] = item
 			continue
 		}
+		if _, isSafe := safe[strings.ToLower(key)]; isSafe {
+			result[key] = item
+			continue
+		}
 		if scrubKeyPattern.MatchString(key) {
 			result[key] = "[Filtered]"
 			continue
 		}
-		result[key] = scrubValue(item)
+		result[key] = scrubValueWithSafe(item, safe)
 	}
 	return result
 }
 
 func scrubValue(value any) any {
+	return scrubValueWithSafe(value, nil)
+}
+
+func scrubValueWithSafe(value any, safe map[string]struct{}) any {
 	switch typed := value.(type) {
 	case map[string]any:
-		return scrubMap(typed)
+		return scrubMapWithSafe(typed, safe)
 	case []any:
 		result := make([]any, len(typed))
 		for index, item := range typed {
-			result[index] = scrubValue(item)
+			result[index] = scrubValueWithSafe(item, safe)
 		}
 		return result
 	case string:
@@ -1142,7 +1174,7 @@ func scrubValue(value any) any {
 }
 
 func scrubString(value string) string {
-	return regexp.MustCompile(`(?i)(bearer\s+|token=|password=)[^\s&]+`).ReplaceAllString(value, "$1[Filtered]")
+	return scrubSecretPattern.ReplaceAllString(value, "$1[Filtered]")
 }
 
 func groupingHash(event Event) string {

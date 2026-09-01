@@ -46,13 +46,14 @@ func (a *ArtifactStore) SetBlobStore(blob BlobStore) {
 }
 
 type SourceMap struct {
-	Version    int
-	DebugID    string
-	File       string
-	SourceRoot string
-	Sources    []string
-	Names      []string
-	Lines      [][]sourceMapping
+	Version        int
+	DebugID        string
+	File           string
+	SourceRoot     string
+	Sources        []string
+	SourcesContent []string
+	Names          []string
+	Lines          [][]sourceMapping
 }
 
 type sourceMapping struct {
@@ -79,23 +80,44 @@ func (a *ArtifactStore) Upload(projectID, release, dist, name string, body []byt
 	a.artifacts[key] = sourceMap
 	a.mu.Unlock()
 	if a.db != nil {
+		debugID := sourceMap.DebugID
 		if a.blob != nil {
 			blobKey := artifactBlobKey(projectID, release, dist, normalizedName)
 			_, err = a.db.Exec(`
 				INSERT INTO sentryx_artifacts
-				  (project_id, release, dist, name, sha256, blob_key, source_map)
-				VALUES ($1, $2, $3, $4, $5, $6, NULL)
+				  (project_id, release, dist, name, sha256, blob_key, source_map, debug_id)
+				VALUES ($1, $2, $3, $4, $5, $6, NULL, NULLIF($7, ))
 				ON CONFLICT (project_id, release, dist, name)
-				DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=EXCLUDED.blob_key, source_map=NULL`,
-				projectID, release, dist, normalizedName, artifactDigest(body), blobKey)
+				DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=EXCLUDED.blob_key, source_map=NULL, debug_id=EXCLUDED.debug_id`,
+				projectID, release, dist, normalizedName, artifactDigest(body), blobKey, debugID)
 		} else {
 			_, err = a.db.Exec(`
 				INSERT INTO sentryx_artifacts
-				  (project_id, release, dist, name, sha256, blob_key, source_map)
-				VALUES ($1, $2, $3, $4, $5, NULL, $6)
+				  (project_id, release, dist, name, sha256, blob_key, source_map, debug_id)
+				VALUES ($1, $2, $3, $4, $5, NULL, $6, NULLIF($7, ))
 				ON CONFLICT (project_id, release, dist, name)
-				DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=NULL, source_map=EXCLUDED.source_map`,
-				projectID, release, dist, normalizedName, artifactDigest(body), body)
+				DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=NULL, source_map=EXCLUDED.source_map, debug_id=EXCLUDED.debug_id`,
+				projectID, release, dist, normalizedName, artifactDigest(body), body, debugID)
+		}
+		if err != nil && strings.Contains(err.Error(), `column "debug_id" of relation`) {
+			if a.blob != nil {
+				blobKey := artifactBlobKey(projectID, release, dist, normalizedName)
+				_, err = a.db.Exec(`
+					INSERT INTO sentryx_artifacts
+					  (project_id, release, dist, name, sha256, blob_key, source_map)
+					VALUES ($1, $2, $3, $4, $5, $6, NULL)
+					ON CONFLICT (project_id, release, dist, name)
+					DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=EXCLUDED.blob_key, source_map=NULL`,
+					projectID, release, dist, normalizedName, artifactDigest(body), blobKey)
+			} else {
+				_, err = a.db.Exec(`
+					INSERT INTO sentryx_artifacts
+					  (project_id, release, dist, name, sha256, blob_key, source_map)
+					VALUES ($1, $2, $3, $4, $5, NULL, $6)
+					ON CONFLICT (project_id, release, dist, name)
+					DO UPDATE SET sha256=EXCLUDED.sha256, blob_key=NULL, source_map=EXCLUDED.source_map`,
+					projectID, release, dist, normalizedName, artifactDigest(body), body)
+			}
 		}
 		if err != nil && strings.Contains(err.Error(), `column "blob_key" of relation`) {
 			// Databases created before migration 002 do not have blob_key yet.
@@ -118,15 +140,23 @@ func (a *ArtifactStore) LookupDebugID(projectID, debugID, filename string, line,
 		return StackFrame{}, false
 	}
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 	for key, sourceMap := range a.artifacts {
 		parts := strings.Split(key, "\x00")
 		if len(parts) == 4 && parts[0] == projectID && strings.ToLower(sourceMap.DebugID) == debugID {
-			return sourceMap.Map(filename, line, column)
+			frame, ok := sourceMap.Map(filename, line, column)
+			a.mu.RUnlock()
+			return frame, ok
 		}
 	}
-	if a.db != nil {
-		rows, err := a.db.Query(`SELECT release, dist, name, COALESCE(blob_key, ''), source_map FROM sentryx_artifacts WHERE project_id=$1`, projectID)
+	db := a.db
+	blob := a.blob
+	a.mu.RUnlock()
+
+	if db != nil {
+		rows, err := db.Query(`SELECT release, dist, name, COALESCE(blob_key, ''), source_map FROM sentryx_artifacts WHERE project_id=$1 AND lower(debug_id)=$2`, projectID, debugID)
+		if err != nil && strings.Contains(err.Error(), `column "debug_id" of relation`) {
+			rows, err = db.Query(`SELECT release, dist, name, COALESCE(blob_key, ''), source_map FROM sentryx_artifacts WHERE project_id=$1`, projectID)
+		}
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -135,13 +165,15 @@ func (a *ArtifactStore) LookupDebugID(projectID, debugID, filename string, line,
 				if rows.Scan(&release, &dist, &name, &blobKey, &body) != nil {
 					continue
 				}
-				if blobKey != "" && a.blob != nil {
-					if externalBody, blobErr := a.blob.Get(context.Background(), blobKey); blobErr == nil {
+				if blobKey != "" && blob != nil {
+					if externalBody, blobErr := blob.Get(context.Background(), blobKey); blobErr == nil {
 						body = externalBody
 					}
 				}
 				sourceMap, parseErr := parseSourceMap(body)
 				if parseErr == nil && strings.EqualFold(sourceMap.DebugID, debugID) {
+					candidate := artifactKey(projectID, release, dist, name)
+					a.cache(candidate, sourceMap)
 					return sourceMap.Map(filename, line, column)
 				}
 			}
@@ -275,6 +307,13 @@ func artifactCandidates(projectID, release, dist, filename string) []string {
 	if dist != "" {
 		result = append(result, artifactKey(projectID, release, "", name))
 	}
+	base := path.Base(name)
+	if base != "." && base != "/" && base != name {
+		result = append(result, artifactKey(projectID, release, dist, base))
+		if dist != "" {
+			result = append(result, artifactKey(projectID, release, "", base))
+		}
+	}
 	return result
 }
 
@@ -325,19 +364,51 @@ func (m SourceMap) Map(filename string, line, column int) (StackFrame, bool) {
 	if best.NameIndex >= 0 && best.NameIndex < len(m.Names) {
 		function = m.Names[best.NameIndex]
 	}
-	return StackFrame{Filename: original, Function: function, Lineno: best.OriginalLine + 1, Colno: best.OriginalColumn, InApp: true}, true
+	frame := StackFrame{
+		Filename: original,
+		Function: function,
+		Lineno:   best.OriginalLine + 1,
+		Colno:    best.OriginalColumn,
+		InApp:    true,
+	}
+	if best.SourceIndex < len(m.SourcesContent) && m.SourcesContent[best.SourceIndex] != "" {
+		sourceText := m.SourcesContent[best.SourceIndex]
+		sourceLines := strings.Split(strings.ReplaceAll(sourceText, "\r\n", "\n"), "\n")
+		targetLine := best.OriginalLine // 0-based
+		if targetLine >= 0 && targetLine < len(sourceLines) {
+			frame.ContextLine = sourceLines[targetLine]
+			preStart := targetLine - 5
+			if preStart < 0 {
+				preStart = 0
+			}
+			if targetLine > preStart {
+				frame.PreContext = make([]string, targetLine-preStart)
+				copy(frame.PreContext, sourceLines[preStart:targetLine])
+			}
+			postEnd := targetLine + 1 + 5
+			if postEnd > len(sourceLines) {
+				postEnd = len(sourceLines)
+			}
+			if postEnd > targetLine+1 {
+				frame.PostContext = make([]string, postEnd-(targetLine+1))
+				copy(frame.PostContext, sourceLines[targetLine+1:postEnd])
+			}
+		}
+	}
+	return frame, true
 }
 
 func parseSourceMap(body []byte) (SourceMap, error) {
 	var wire struct {
-		Version    int      `json:"version"`
-		DebugID    string   `json:"debug_id"`
-		XDebugID   string   `json:"x_debug_id"`
-		File       string   `json:"file"`
-		SourceRoot string   `json:"sourceRoot"`
-		Sources    []string `json:"sources"`
-		Names      []string `json:"names"`
-		Mappings   string   `json:"mappings"`
+		Version        int      `json:"version"`
+		DebugID        string   `json:"debug_id"`
+		XDebugID       string   `json:"x_debug_id"`
+		File           string   `json:"file"`
+		SourceRoot     string   `json:"sourceRoot"`
+		Sources        []string `json:"sources"`
+		SourcesContent []string `json:"sourcesContent"`
+		Names          []string `json:"names"`
+		Mappings       string   `json:"mappings"`
 	}
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return SourceMap{}, err
@@ -353,7 +424,16 @@ func parseSourceMap(body []byte) (SourceMap, error) {
 	if debugID == "" {
 		debugID = wire.XDebugID
 	}
-	return SourceMap{Version: wire.Version, DebugID: debugID, File: wire.File, SourceRoot: wire.SourceRoot, Sources: wire.Sources, Names: wire.Names, Lines: lines}, nil
+	return SourceMap{
+		Version:        wire.Version,
+		DebugID:        debugID,
+		File:           wire.File,
+		SourceRoot:     wire.SourceRoot,
+		Sources:        wire.Sources,
+		SourcesContent: wire.SourcesContent,
+		Names:          wire.Names,
+		Lines:          lines,
+	}, nil
 }
 
 const base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"

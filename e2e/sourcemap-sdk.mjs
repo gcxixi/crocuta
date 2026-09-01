@@ -1,7 +1,6 @@
 import * as Sentry from "@sentry/node";
 
-const dsn = process.env.SENTRYX_DSN;
-if (!dsn) throw new Error("SENTRYX_DSN is required");
+const dsn = process.env.SENTRYX_DSN || "http://public@127.0.0.1:8081/1";
 
 Sentry.init({
   dsn,
@@ -10,7 +9,7 @@ Sentry.init({
   tracesSampleRate: 0,
 });
 
-const baseURL = process.env.SENTRYX_BASE_URL;
+const baseURL = process.env.SENTRYX_BASE_URL || process.env.SENTRYX_SERVER_URL || "http://127.0.0.1:33000";
 if (baseURL) {
   const form = new FormData();
   form.append("file", new Blob([JSON.stringify({

@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"syscall"
 	"time"
 
 	"gitea.home.arpa/sundust/sentryx/internal/sentryx"
@@ -20,6 +24,9 @@ func main() {
 		slog.Error("invalid server role", "role", *role)
 		os.Exit(2)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	piiConfig := sentryx.PIIConfigFromEnv()
 	blobStore, err := sentryx.NewBlobStoreFromEnv()
 	if err != nil {
@@ -29,8 +36,8 @@ func main() {
 	var store sentryx.EventStore
 	var closeStore func() error
 	if dsn := os.Getenv("SENTRYX_DATABASE_URL"); dsn != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		postgres, err := sentryx.NewPostgresStore(ctx, dsn)
+		dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		postgres, err := sentryx.NewPostgresStore(dbCtx, dsn)
 		cancel()
 		if err != nil {
 			slog.Error("postgres store unavailable", "error", err)
@@ -52,10 +59,11 @@ func main() {
 		}
 		defer postgres.Close()
 		slog.Info("sentryx worker running")
-		if err := postgres.RunWorker(context.Background(), 20, 250*time.Millisecond); err != nil {
+		if err := postgres.RunWorker(ctx, 20, 250*time.Millisecond); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("worker stopped", "error", err)
 			os.Exit(1)
 		}
+		slog.Info("sentryx worker stopped cleanly")
 		return
 	}
 	app := sentryx.NewApp(store)
@@ -79,18 +87,34 @@ func main() {
 	if closeStore != nil {
 		defer closeStore()
 	}
+	var workerWg sync.WaitGroup
 	if postgres, ok := store.(*sentryx.PostgresStore); ok && *role == "all" {
+		workerWg.Add(1)
 		go func() {
-			if err := postgres.RunWorker(context.Background(), 20, 250*time.Millisecond); err != nil {
+			defer workerWg.Done()
+			if err := postgres.RunWorker(ctx, 20, 250*time.Millisecond); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Error("worker stopped", "error", err)
 			}
 		}()
 	}
+	server := &http.Server{
+		Addr:    *addr,
+		Handler: app.Handler(),
+	}
+	go func() {
+		<-ctx.Done()
+		slog.Info("shutting down sentryx server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
 	slog.Info("sentryx server listening", "addr", *addr)
-	if err := http.ListenAndServe(*addr, app.Handler()); err != nil {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
+	workerWg.Wait()
+	slog.Info("sentryx server stopped cleanly")
 }
 
 func envOr(key, fallback string) string {
