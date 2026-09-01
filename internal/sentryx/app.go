@@ -68,25 +68,45 @@ type Store struct {
 	artifacts *ArtifactStore
 }
 
+type EventStore interface {
+	Ingest(projectID, key string, body []byte) (int, error)
+	ListIssues(projectID string) []Issue
+	ListEvents(projectID, issueID string) []Event
+}
+
 func NewStore() *Store {
 	return &Store{events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string), artifacts: NewArtifactStore()}
 }
 
+func (s *Store) SetArtifactStore(artifacts *ArtifactStore) {
+	s.mu.Lock()
+	s.artifacts = artifacts
+	s.mu.Unlock()
+}
+
 type App struct {
-	Store       *Store
+	Store       EventStore
+	Artifacts   *ArtifactStore
 	MaxEnvelope int64
 	RelayToken  string
 	Logger      *slog.Logger
 }
 
-func NewApp(store *Store) *App {
+func NewApp(store EventStore) *App {
 	if store == nil {
 		store = NewStore()
 	}
-	if store.artifacts == nil {
-		store.artifacts = NewArtifactStore()
+	artifacts := NewArtifactStore()
+	if memoryStore, ok := store.(*Store); ok {
+		if memoryStore.artifacts == nil {
+			memoryStore.artifacts = artifacts
+		}
+		artifacts = memoryStore.artifacts
 	}
-	return &App{Store: store, MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}
+	if artifactAware, ok := store.(interface{ SetArtifactStore(*ArtifactStore) }); ok {
+		artifactAware.SetArtifactStore(artifacts)
+	}
+	return &App{Store: store, Artifacts: artifacts, MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}
 }
 
 func (a *App) Handler() http.Handler {
@@ -277,7 +297,7 @@ func (a *App) handleArtifactUpload(w http.ResponseWriter, r *http.Request, parts
 		http.Error(w, "artifact name required", http.StatusBadRequest)
 		return
 	}
-	if err := a.Store.artifacts.Upload(projectID, release, r.URL.Query().Get("dist"), name, body); err != nil {
+	if err := a.Artifacts.Upload(projectID, release, r.URL.Query().Get("dist"), name, body); err != nil {
 		a.Logger.Warn("artifact rejected", "error", err, "project_id", projectID)
 		http.Error(w, "invalid source map", http.StatusBadRequest)
 		return
