@@ -2,7 +2,7 @@ const base = process.env.SENTRYX_BASE_URL || "http://127.0.0.1:8081";
 const queryBase = process.env.SENTRYX_QUERY_URL || base;
 const project = process.env.SENTRYX_PROJECT || "1";
 const key = process.env.SENTRYX_KEY || "public";
-const eventID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const eventID = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 const event = JSON.stringify({
   event_id: eventID,
