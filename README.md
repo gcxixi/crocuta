@@ -38,6 +38,8 @@ Server 是模块化单体，同一二进制支持 `api`、`worker`、`all` 三�
 
 - [完整技术方案](docs/technical-design.md)
 - [SDK 与协议兼容范围](docs/compatibility.md)
+- [UI API 契约](docs/ui-api.md)
+- [UI 技术方案（Ant Design）](docs/ui-technical-design.md)
 - [分阶段实施路线](docs/roadmap.md)
 - [ADR-0001：模块化单体与 PostgreSQL 持久队列](docs/adr/0001-modular-monolith.md)
 - [ADR-0002：版本化 Issue 分组](docs/adr/0002-versioned-grouping.md)

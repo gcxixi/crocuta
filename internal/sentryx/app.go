@@ -316,48 +316,12 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleReleaseCollection(w, r, parts)
 		return
 	}
-	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "client-reports" && r.Method == http.MethodGet {
-		if extended, ok := a.Store.(ExtendedStore); ok {
-			writeJSON(w, http.StatusOK, extended.ListClientReports(r.URL.Query().Get("project")))
-			return
-		}
-		writeJSON(w, http.StatusOK, []ClientReport{})
-		return
-	}
-	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "attachments" && r.Method == http.MethodGet {
-		if extended, ok := a.Store.(ExtendedStore); ok {
-			writeJSON(w, http.StatusOK, extended.ListAttachments(r.URL.Query().Get("project"), r.URL.Query().Get("event")))
-			return
-		}
-		writeJSON(w, http.StatusOK, []Attachment{})
-		return
-	}
-	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "signals" && r.Method == http.MethodGet {
-		if extended, ok := a.Store.(ExtendedStore); ok {
-			writeJSON(w, http.StatusOK, extended.ListSignals(r.URL.Query().Get("project"), r.URL.Query().Get("kind")))
-			return
-		}
-		writeJSON(w, http.StatusOK, []StoredSignal{})
-		return
-	}
-	if len(parts) >= 4 && parts[0] == "api" && parts[1] == "0" && parts[2] == "projects" && parts[3] == "releases" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
-		a.handleReleaseCollection(w, r, parts)
-		return
-	}
 	if isArtifactUploadPath(parts) && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
 		if !a.validArtifactToken(r) {
 			http.Error(w, "management authentication required", http.StatusUnauthorized)
 			return
 		}
 		a.handleArtifactUpload(w, r, parts)
-		return
-	}
-	if isArtifactManagementPath(parts) && (r.Method == http.MethodGet || r.Method == http.MethodDelete) {
-		if !a.validArtifactToken(r) {
-			http.Error(w, "management authentication required", http.StatusUnauthorized)
-			return
-		}
-		a.handleArtifactManagement(w, r, parts)
 		return
 	}
 	if isArtifactManagementPath(parts) && (r.Method == http.MethodGet || r.Method == http.MethodDelete) {
