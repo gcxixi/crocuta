@@ -74,6 +74,9 @@ func (p *PostgresStore) CreateTeam(orgRef, name, slug string) (Team, error) {
 	if slug == "" {
 		slug = slugify(name)
 	}
+	if slug == "" {
+		return Team{}, errors.New("team slug is required")
+	}
 	if name == "" {
 		name = slug
 	}
@@ -144,17 +147,28 @@ func (p *PostgresStore) CreateProject(orgRef, name, slug, platform string) (Cont
 	if slug == "" {
 		slug = slugify(name)
 	}
+	if slug == "" {
+		return ControlProject{}, errors.New("project slug is required")
+	}
 	if name == "" {
 		name = slug
 	}
 	project := ControlProject{ID: randomID(), OrganizationID: orgID, Slug: slug, Name: name, Platform: platform, DateCreated: timeNowUTC(), IsMember: true}
-	_, err = p.db.Exec(`INSERT INTO sentryx_control_projects (id, organization_id, slug, name, platform, date_created) VALUES ($1,$2,$3,$4,$5,$6)`, project.ID, orgID, slug, name, platform, project.DateCreated)
+	tx, err := p.db.Begin()
+	if err != nil {
+		return ControlProject{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO sentryx_control_projects (id, organization_id, slug, name, platform, date_created) VALUES ($1,$2,$3,$4,$5,$6)`, project.ID, orgID, slug, name, platform, project.DateCreated)
 	if err != nil {
 		return ControlProject{}, err
 	}
 	key := ProjectKey{ID: randomID(), ProjectID: project.ID, Name: "Default", Public: "public-" + project.ID, Secret: ""}
 	key.DSN = "http://" + key.Public + "@localhost/" + url.PathEscape(project.ID)
-	if _, err = p.db.Exec(`INSERT INTO sentryx_project_keys (id, project_id, name, public_key, secret_key) VALUES ($1,$2,$3,$4,$5)`, key.ID, project.ID, key.Name, key.Public, key.Secret); err != nil {
+	if _, err = tx.Exec(`INSERT INTO sentryx_project_keys (id, project_id, name, public_key, secret_key) VALUES ($1,$2,$3,$4,$5)`, key.ID, project.ID, key.Name, key.Public, key.Secret); err != nil {
+		return ControlProject{}, err
+	}
+	if err = tx.Commit(); err != nil {
 		return ControlProject{}, err
 	}
 	project.Keys = []ProjectKey{key}
@@ -266,13 +280,31 @@ func (p *PostgresStore) ValidProjectKey(projectID, publicKey string) bool {
 	return exists
 }
 
-func (p *PostgresStore) EnsureProject(projectID string) {
+func (p *PostgresStore) EnsureProject(projectID, publicKey string) error {
 	if strings.TrimSpace(projectID) == "" {
-		return
+		return errors.New("project id is required")
 	}
-	_, _ = p.db.Exec(`INSERT INTO sentryx_organizations (id, slug, name) VALUES ('1','default','Default') ON CONFLICT (id) DO NOTHING`)
-	_, _ = p.db.Exec(`INSERT INTO sentryx_control_projects (id, organization_id, slug, name, platform) VALUES ($1,'1',$1,$1,'javascript') ON CONFLICT (id) DO NOTHING`, projectID)
-	_, _ = p.db.Exec(`INSERT INTO sentryx_project_keys (id, project_id, name, public_key, secret_key) SELECT $1,$2,'Default','public','' WHERE NOT EXISTS (SELECT 1 FROM sentryx_project_keys WHERE project_id=$2)`, randomID(), projectID)
+	if strings.TrimSpace(publicKey) == "" {
+		publicKey = "public-" + projectID
+	}
+	tx, err := p.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO sentryx_organizations (id, slug, name) VALUES ('1','default','Default') ON CONFLICT (id) DO NOTHING`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO sentryx_control_projects (id, organization_id, slug, name, platform) VALUES ($1,'1',$1,$1,'javascript') ON CONFLICT (id) DO NOTHING`, projectID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO sentryx_project_keys (id, project_id, name, public_key, secret_key)
+		SELECT $1,$2,'Default',$3,''
+		WHERE NOT EXISTS (SELECT 1 FROM sentryx_project_keys WHERE project_id=$2)
+		ON CONFLICT (public_key) DO NOTHING`, randomID(), projectID, publicKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 var _ ControlPlane = (*PostgresStore)(nil)

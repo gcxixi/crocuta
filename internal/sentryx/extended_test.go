@@ -3,6 +3,7 @@ package sentryx
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -258,6 +259,49 @@ func TestRelayMirrorsSentryEnvelopeWithoutBlockingPrimary(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("mirror did not receive the envelope")
+	}
+}
+
+func TestRelayMirrorUsesDetachedContext(t *testing.T) {
+	sourceContext, cancelSource := context.WithCancel(context.Background())
+	source, err := http.NewRequestWithContext(sourceContext, http.MethodPost, "http://relay.test/api/1/envelope", bytes.NewReader([]byte("body")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirrorContext, cancelMirror := context.WithCancel(context.Background())
+	defer cancelMirror()
+	mirrorRequest, err := newRelayRequestWithContext(mirrorContext, source, "http://mirror.test/api/1/envelope", []byte("body"), false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelSource()
+	select {
+	case <-mirrorRequest.Context().Done():
+		t.Fatal("mirror request was cancelled with the source request")
+	default:
+	}
+}
+
+func TestRelayDoesNotDuplicateCORSHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "https://upstream.invalid")
+		w.Header().Set("X-Upstream", "ok")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	relay := httptest.NewServer(NewRelay(upstream.URL, DefaultMaxEnvelopeBytes, ""))
+	defer relay.Close()
+	event := []byte(`{"event_id":"66666666666666666666666666666666","message":"cors"}`)
+	response, err := http.Post(relay.URL+"/api/1/envelope?sentry_key=public", "application/x-sentry-envelope", bytes.NewReader(testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(event))+`}`, event))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if values := response.Header.Values("Access-Control-Allow-Origin"); len(values) != 1 || values[0] != "*" {
+		t.Fatalf("cors headers=%v", values)
+	}
+	if response.Header.Get("X-Upstream") != "ok" {
+		t.Fatalf("upstream header missing: %v", response.Header)
 	}
 }
 

@@ -384,7 +384,9 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.Control != nil {
-		a.Control.EnsureProject(projectID)
+		if err := a.Control.EnsureProject(projectID, key); err != nil {
+			a.Logger.Warn("control plane project provisioning failed", "error", err, "project_id", projectID)
+		}
 	}
 	if a.RateLimiter != nil {
 		bucket := projectID + ":" + key + ":" + requestClientKey(r.RemoteAddr)

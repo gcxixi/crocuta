@@ -3,6 +3,7 @@ package sentryx
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -33,6 +34,7 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 		maxBody = DefaultMaxEnvelopeBytes
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
+	mirrorSlots := make(chan struct{}, 32)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			setCORSHeaders(w)
@@ -70,10 +72,22 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 			req.Header.Set("Content-Encoding", "gzip")
 		}
 		if mirror != "" && isEnvelopePath(r.URL.Path) {
-			mirrorReq, mirrorErr := newRelayRequest(r, strings.TrimRight(mirror, "/")+r.URL.RequestURI(), body, scrub, mirrorToken)
+			mirrorContext, cancelMirror := context.WithTimeout(context.Background(), 10*time.Second)
+			mirrorReq, mirrorErr := newRelayRequestWithContext(mirrorContext, r, strings.TrimRight(mirror, "/")+r.URL.RequestURI(), body, scrub, mirrorToken)
 			if mirrorErr == nil {
-				go mirrorRelayRequest(client, mirrorReq)
+				select {
+				case mirrorSlots <- struct{}{}:
+					go func() {
+						defer cancelMirror()
+						defer func() { <-mirrorSlots }()
+						mirrorRelayRequest(client, mirrorReq)
+					}()
+				default:
+					cancelMirror()
+					slog.Default().Warn("relay mirror capacity exhausted", "path", r.URL.Path)
+				}
 			} else {
+				cancelMirror()
 				slog.Default().Warn("relay mirror request build failed", "error", mirrorErr, "path", r.URL.Path)
 			}
 		}
@@ -83,22 +97,25 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 			return
 		}
 		defer response.Body.Close()
-		for key, values := range response.Header {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
+		copyRelayResponseHeaders(w.Header(), response.Header)
 		w.WriteHeader(response.StatusCode)
 		_, _ = io.Copy(w, response.Body)
 	})
 }
 
 func newRelayRequest(source *http.Request, targetURL string, body []byte, scrub bool, token string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(source.Context(), source.Method, targetURL, bytes.NewReader(body))
+	return newRelayRequestWithContext(source.Context(), source, targetURL, body, scrub, token)
+}
+
+func newRelayRequestWithContext(ctx context.Context, source *http.Request, targetURL string, body []byte, scrub bool, token string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, source.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	for key, values := range source.Header {
+		if isHopByHopHeader(key) {
+			continue
+		}
 		if scrub && (strings.EqualFold(key, "Content-Encoding") || strings.EqualFold(key, "Content-Length")) {
 			continue
 		}
@@ -110,6 +127,27 @@ func newRelayRequest(source *http.Request, targetURL string, body []byte, scrub 
 		req.Header.Set("X-SentryX-Relay-Token", token)
 	}
 	return req, nil
+}
+
+func copyRelayResponseHeaders(destination, source http.Header) {
+	for key, values := range source {
+		if isHopByHopHeader(key) || strings.HasPrefix(strings.ToLower(key), "access-control-") {
+			continue
+		}
+		destination.Del(key)
+		for _, value := range values {
+			destination.Add(key, value)
+		}
+	}
+}
+
+func isHopByHopHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
+	}
 }
 
 func mirrorRelayRequest(client *http.Client, request *http.Request) {

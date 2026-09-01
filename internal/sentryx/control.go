@@ -97,7 +97,7 @@ type ControlPlane interface {
 	ListMembers(orgRef string) []OrgMember
 	GetUser(userID string) (ControlUser, bool)
 	ValidProjectKey(projectID, publicKey string) bool
-	EnsureProject(projectID string)
+	EnsureProject(projectID, publicKey string) error
 }
 
 type memoryControlPlane struct {
@@ -124,6 +124,9 @@ func NewMemoryControlPlane() ControlPlane {
 	}
 	plane.organizations["1"] = Organization{ID: "1", Slug: "default", Name: "Default", DateCreated: now, Status: map[string]string{"id": "active", "name": "active"}, AllowMemberInvite: true, AllowMemberProjectCreation: true}
 	plane.orgBySlug["default"] = "1"
+	user := ControlUser{ID: "1", Name: "SentryX Admin", Username: "admin", DateJoined: now}
+	plane.users[user.ID] = user
+	plane.members["1"] = []OrgMember{{ID: "1", OrganizationID: "1", User: user, Name: user.Name, Role: "owner", DateCreated: now}}
 	return plane
 }
 
@@ -185,6 +188,9 @@ func (m *memoryControlPlane) CreateTeam(orgRef, name, slug string) (Team, error)
 	if slug == "" {
 		slug = slugify(name)
 	}
+	if slug == "" {
+		return Team{}, errors.New("team slug is required")
+	}
 	if name == "" {
 		name = slug
 	}
@@ -244,6 +250,9 @@ func (m *memoryControlPlane) CreateProject(orgRef, name, slug, platform string) 
 	if slug == "" {
 		slug = slugify(name)
 	}
+	if slug == "" {
+		return ControlProject{}, errors.New("project slug is required")
+	}
 	if name == "" {
 		name = slug
 	}
@@ -253,7 +262,7 @@ func (m *memoryControlPlane) CreateProject(orgRef, name, slug, platform string) 
 	project := ControlProject{ID: m.nextID(), OrganizationID: org.ID, Slug: slug, Name: name, Platform: platform, DateCreated: time.Now().UTC(), IsMember: true, Features: []string{"event-attachments", "releases"}}
 	m.projects[project.ID] = project
 	m.projectBySlug[org.ID+":"+strings.ToLower(slug)] = project.ID
-	key := ProjectKey{ID: m.nextID(), ProjectID: project.ID, Name: "Default", Public: "public-" + project.ID, Secret: "secret-" + project.ID}
+	key := ProjectKey{ID: m.nextID(), ProjectID: project.ID, Name: "Default", Public: "public-" + project.ID}
 	key.DSN = "http://" + key.Public + "@localhost/" + project.ID
 	m.keys[project.ID] = []ProjectKey{key}
 	return m.withProjectRelations(project), nil
@@ -342,18 +351,22 @@ func (m *memoryControlPlane) ValidProjectKey(projectID, publicKey string) bool {
 	return false
 }
 
-func (m *memoryControlPlane) EnsureProject(projectID string) {
+func (m *memoryControlPlane) EnsureProject(projectID, publicKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.projects[projectID]; ok {
-		return
+		return nil
 	}
 	project := ControlProject{ID: projectID, OrganizationID: "1", Slug: projectID, Name: projectID, Platform: "javascript", DateCreated: time.Now().UTC(), IsMember: true}
 	m.projects[projectID] = project
 	m.projectBySlug["1:"+strings.ToLower(project.Slug)] = projectID
-	key := ProjectKey{ID: m.nextID(), ProjectID: projectID, Name: "Default", Public: "public"}
-	key.DSN = "http://public@localhost/" + url.PathEscape(projectID)
+	if publicKey == "" {
+		publicKey = "public-" + projectID
+	}
+	key := ProjectKey{ID: m.nextID(), ProjectID: projectID, Name: "Default", Public: publicKey}
+	key.DSN = "http://" + url.QueryEscape(publicKey) + "@localhost/" + url.PathEscape(projectID)
 	m.keys[projectID] = []ProjectKey{key}
+	return nil
 }
 
 func (m *memoryControlPlane) withProjectRelations(project ControlProject) ControlProject {
