@@ -40,3 +40,16 @@ CREATE TABLE IF NOT EXISTS sentryx_events (
   UNIQUE (project_id, event_id)
 );
 CREATE INDEX IF NOT EXISTS sentryx_events_issue_received_idx ON sentryx_events (project_id, issue_id, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS sentryx_artifacts (
+  id BIGSERIAL PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  release TEXT NOT NULL,
+  dist TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_map BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (project_id, release, dist, name)
+);
+CREATE INDEX IF NOT EXISTS sentryx_artifacts_lookup_idx ON sentryx_artifacts (project_id, release, dist, name);

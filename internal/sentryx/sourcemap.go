@@ -2,6 +2,7 @@ package sentryx
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,10 +18,15 @@ import (
 type ArtifactStore struct {
 	mu        sync.RWMutex
 	artifacts map[string]SourceMap
+	db        *sql.DB
 }
 
 func NewArtifactStore() *ArtifactStore {
 	return &ArtifactStore{artifacts: make(map[string]SourceMap)}
+}
+
+func newArtifactStoreWithDB(db *sql.DB) *ArtifactStore {
+	return &ArtifactStore{artifacts: make(map[string]SourceMap), db: db}
 }
 
 type SourceMap struct {
@@ -49,6 +55,15 @@ func (a *ArtifactStore) Upload(projectID, release, dist, name string, body []byt
 	a.mu.Lock()
 	a.artifacts[key] = sourceMap
 	a.mu.Unlock()
+	if a.db != nil {
+		_, err = a.db.Exec(`
+			INSERT INTO sentryx_artifacts
+			  (project_id, release, dist, name, sha256, source_map)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (project_id, release, dist, name)
+			DO UPDATE SET sha256=EXCLUDED.sha256, source_map=EXCLUDED.source_map`,
+			projectID, release, dist, normalizeArtifactName(name), artifactDigest(body), body)
+	}
 	return nil
 }
 
@@ -58,6 +73,26 @@ func (a *ArtifactStore) Lookup(projectID, release, dist, filename string, line, 
 	for _, candidate := range artifactCandidates(projectID, release, dist, filename) {
 		if sourceMap, ok := a.artifacts[candidate]; ok {
 			return sourceMap.Map(filename, line, column)
+		}
+	}
+	if a.db != nil {
+		for _, candidate := range artifactCandidates(projectID, release, dist, filename) {
+			parts := strings.Split(candidate, "\x00")
+			if len(parts) != 4 {
+				continue
+			}
+			var body []byte
+			if err := a.db.QueryRow(`SELECT source_map FROM sentryx_artifacts WHERE project_id=$1 AND release=$2 AND dist=$3 AND name=$4`, parts[0], parts[1], parts[2], parts[3]).Scan(&body); err != nil {
+				continue
+			}
+			if sourceMap, err := parseSourceMap(body); err == nil {
+				a.mu.RUnlock()
+				a.mu.Lock()
+				a.artifacts[candidate] = sourceMap
+				a.mu.Unlock()
+				a.mu.RLock()
+				return sourceMap.Map(filename, line, column)
+			}
 		}
 	}
 	return StackFrame{}, false

@@ -97,13 +97,18 @@ func NewApp(store EventStore) *App {
 		store = NewStore()
 	}
 	artifacts := NewArtifactStore()
+	if provider, ok := store.(interface{ ArtifactStore() *ArtifactStore }); ok {
+		artifacts = provider.ArtifactStore()
+	}
 	if memoryStore, ok := store.(*Store); ok {
 		if memoryStore.artifacts == nil {
 			memoryStore.artifacts = artifacts
 		}
 		artifacts = memoryStore.artifacts
 	}
-	if artifactAware, ok := store.(interface{ SetArtifactStore(*ArtifactStore) }); ok {
+	if _, provider := store.(interface{ ArtifactStore() *ArtifactStore }); provider {
+		// The persistent store already owns an ArtifactStore backed by its DB.
+	} else if artifactAware, ok := store.(interface{ SetArtifactStore(*ArtifactStore) }); ok {
 		artifactAware.SetArtifactStore(artifacts)
 	}
 	return &App{Store: store, Artifacts: artifacts, MaxEnvelope: DefaultMaxEnvelopeBytes, Logger: slog.Default()}

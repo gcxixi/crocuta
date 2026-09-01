@@ -27,12 +27,14 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		db.Close()
 		return nil, err
 	}
-	return &PostgresStore{db: db, artifacts: NewArtifactStore()}, nil
+	return &PostgresStore{db: db, artifacts: newArtifactStoreWithDB(db)}, nil
 }
 
 func (p *PostgresStore) Close() error { return p.db.Close() }
 
 func (p *PostgresStore) SetArtifactStore(artifacts *ArtifactStore) { p.artifacts = artifacts }
+
+func (p *PostgresStore) ArtifactStore() *ArtifactStore { return p.artifacts }
 
 func (p *PostgresStore) Ingest(projectID, _ string, body []byte) (accepted int, err error) {
 	items, err := parseEnvelope(body)
