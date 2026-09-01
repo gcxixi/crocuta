@@ -1,4 +1,5 @@
 const base = process.env.SENTRYX_BASE_URL || "http://127.0.0.1:8081";
+const queryBase = process.env.SENTRYX_QUERY_URL || base;
 const project = process.env.SENTRYX_PROJECT || "1";
 const key = process.env.SENTRYX_KEY || "public";
 const eventID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -40,14 +41,15 @@ for (const endpoint of [
   `/api/0/signals?project=${project}&kind=replay_recording`,
   `/api/0/signals?project=${project}&kind=minidump`,
 ]) {
-  const result = await fetch(base + endpoint);
+  if (!process.env.SENTRYX_QUERY_URL) continue;
+  const result = await fetch(queryBase + endpoint);
   if (!result.ok) throw new Error(`${endpoint} ${result.status}`);
   const text = await result.text();
   console.log(endpoint, text);
   if (endpoint.includes("attachments")) {
     const list = JSON.parse(text);
     if (list.length !== 1) throw new Error(`attachment count ${list.length}`);
-    const download = await fetch(`${base}/api/0/attachments/${list[0].id}?project=${project}`);
+    const download = await fetch(`${queryBase}/api/0/attachments/${list[0].id}?project=${project}`);
     const bytes = Buffer.from(await download.arrayBuffer());
     if (bytes.toString() !== "extension attachment") throw new Error("attachment body mismatch");
     console.log("attachment download", bytes.length);
