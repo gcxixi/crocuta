@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -85,11 +86,14 @@ func (s *Store) SetArtifactStore(artifacts *ArtifactStore) {
 }
 
 type App struct {
-	Store       EventStore
-	Artifacts   *ArtifactStore
-	MaxEnvelope int64
-	RelayToken  string
-	Logger      *slog.Logger
+	Store         EventStore
+	Artifacts     *ArtifactStore
+	MaxEnvelope   int64
+	RelayToken    string
+	ArtifactToken string
+	ProjectKeys   map[string]map[string]struct{}
+	RateLimiter   *RateLimiter
+	Logger        *slog.Logger
 }
 
 func NewApp(store EventStore) *App {
@@ -140,6 +144,10 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isArtifactUploadPath(parts) && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
+		if !a.validArtifactToken(r) {
+			http.Error(w, "management authentication required", http.StatusUnauthorized)
+			return
+		}
 		a.handleArtifactUpload(w, r, parts)
 		return
 	}
@@ -164,6 +172,19 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing sentry key", http.StatusUnauthorized)
 		return
 	}
+	if !a.validProjectKey(projectID, key) {
+		http.Error(w, "invalid sentry key", http.StatusUnauthorized)
+		return
+	}
+	if a.RateLimiter != nil {
+		bucket := projectID + ":" + key + ":" + requestClientKey(r.RemoteAddr)
+		if allowed, retryAfter := a.RateLimiter.Allow(bucket, time.Now().UTC()); !allowed {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+			w.Header().Set("X-Sentry-Rate-Limits", fmt.Sprintf("%d:error:project", retryAfter))
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+	}
 	if r.Body == nil {
 		http.Error(w, "empty body", http.StatusBadRequest)
 		return
@@ -184,6 +205,32 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-SentryX-Accepted", fmt.Sprintf("%d", accepted))
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted})
+}
+
+func (a *App) validProjectKey(projectID, key string) bool {
+	if len(a.ProjectKeys) == 0 {
+		return true
+	}
+	keys, ok := a.ProjectKeys[projectID]
+	if !ok {
+		return false
+	}
+	_, ok = keys[key]
+	return ok
+}
+
+func (a *App) validArtifactToken(r *http.Request) bool {
+	if a.ArtifactToken == "" {
+		return true
+	}
+	token := r.Header.Get("X-SentryX-Management-Token")
+	if token == "" {
+		const prefix = "Bearer "
+		if value := r.Header.Get("Authorization"); strings.HasPrefix(value, prefix) {
+			token = strings.TrimSpace(strings.TrimPrefix(value, prefix))
+		}
+	}
+	return len(token) == len(a.ArtifactToken) && subtle.ConstantTimeCompare([]byte(token), []byte(a.ArtifactToken)) == 1
 }
 
 func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {

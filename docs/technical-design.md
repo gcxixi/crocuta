@@ -282,6 +282,7 @@ Go 版本通过 `go.mod` 和 `toolchain` 固定；支持当前团队选定版本
 ## 11. 可靠性、背压与一致性
 
 - Relay 有全局、项目、key、IP 四层限流；多实例初期允许近似配额，严格全局配额需要时再接共享 rate limiter。
+- 当前实现提供可配置的项目 key 白名单、管理 Artifact token 和单进程 project/key/client 固定窗口限流；配置为空时不改变 SDK 兼容行为，多实例严格配额仍应替换为共享限流器。
 - Relay 到 Server 使用短超时、有限重试和抖动；只有 body 可安全重放且未获得响应时重试，并携带 checksum/idempotency 信息。
 - Server 在队列积压、数据库延迟或磁盘水位超过阈值时主动 `429/503`，不能继续接收后静默丢弃。
 - Worker 使用租约和幂等写实现 at-least-once；不承诺 exactly-once transport，但实现 exactly-once event aggregation effect。

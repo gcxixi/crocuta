@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"gitea.home.arpa/sundust/sentryx/internal/sentryx"
@@ -60,6 +61,16 @@ func main() {
 		app.Artifacts.SetBlobStore(blobStore)
 	}
 	app.RelayToken = os.Getenv("SENTRYX_RELAY_TOKEN")
+	app.ArtifactToken = os.Getenv("SENTRYX_ARTIFACT_TOKEN")
+	app.ProjectKeys = sentryx.ParseProjectKeys(os.Getenv("SENTRYX_PROJECT_KEYS"))
+	if value := os.Getenv("SENTRYX_RATE_LIMIT_PER_MINUTE"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil || limit <= 0 {
+			slog.Error("invalid SENTRYX_RATE_LIMIT_PER_MINUTE", "value", value)
+			os.Exit(2)
+		}
+		app.RateLimiter = sentryx.NewRateLimiter(limit)
+	}
 	if closeStore != nil {
 		defer closeStore()
 	}

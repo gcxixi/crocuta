@@ -42,6 +42,9 @@ services:
       SENTRYX_S3_BUCKET: ${SENTRYX_S3_BUCKET:-sentryx}
       SENTRYX_S3_PREFIX: ${SENTRYX_S3_PREFIX:-sentryx}
       SENTRYX_S3_SECURE: ${SENTRYX_S3_SECURE:-true}
+      SENTRYX_PROJECT_KEYS: ${SENTRYX_PROJECT_KEYS:-}
+      SENTRYX_ARTIFACT_TOKEN: ${SENTRYX_ARTIFACT_TOKEN:-}
+      SENTRYX_RATE_LIMIT_PER_MINUTE: ${SENTRYX_RATE_LIMIT_PER_MINUTE:-}
     volumes:
       - sentryx-blobs:/var/lib/sentryx/blobs
     depends_on:

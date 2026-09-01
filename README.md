@@ -84,4 +84,6 @@ PostgreSQL 运行模式：先执行 `migrations/001_init.sql`，再设置 `SENTR
 
 Source Map 存储通过 `SENTRYX_BLOB_BACKEND` 选择：`database`（默认，兼容旧 schema）、`file`（设置 `SENTRYX_BLOB_DIR`）或 `s3`。S3 模式需要 `SENTRYX_S3_ENDPOINT`、`SENTRYX_S3_ACCESS_KEY`、`SENTRYX_S3_SECRET_KEY`、`SENTRYX_S3_BUCKET`，可选 `SENTRYX_S3_REGION`、`SENTRYX_S3_PREFIX` 和 `SENTRYX_S3_SECURE`。切换已有 PostgreSQL 数据库前先执行 `migrations/002_blobstore.sql`；旧 Worker 可在滚动升级期间继续读取 BYTEA。
 
+生产接入可设置 `SENTRYX_PROJECT_KEYS=project:key,...` 开启项目公钥白名单，设置 `SENTRYX_ARTIFACT_TOKEN` 保护 Source Map 管理上传，并用 `SENTRYX_RATE_LIMIT_PER_MINUTE` 开启每个 project/key/client 的进程内限流；未设置时保持开发兼容模式。
+
 NUC 真实 SDK E2E 的启动、执行、数据库核对和重启恢复步骤见 [`docs/e2e-nuc.md`](docs/e2e-nuc.md)。
