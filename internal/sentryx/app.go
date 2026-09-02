@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -154,15 +155,20 @@ type ArtifactInfo struct {
 }
 
 type Issue struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"project_id"`
-	Title       string    `json:"title"`
-	Level       string    `json:"level,omitempty"`
-	Count       int       `json:"count"`
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
-	LatestEvent string    `json:"latest_event_id"`
-	GroupHash   string    `json:"group_hash"`
+	ID                string     `json:"id"`
+	ProjectID         string     `json:"project_id"`
+	Title             string     `json:"title"`
+	Level             string     `json:"level,omitempty"`
+	Count             int        `json:"count"`
+	FirstSeen         time.Time  `json:"first_seen"`
+	LastSeen          time.Time  `json:"last_seen"`
+	LatestEvent       string     `json:"latest_event_id"`
+	GroupHash         string     `json:"group_hash"`
+	Status            string     `json:"status"`
+	StatusChangedAt   time.Time  `json:"status_changed_at"`
+	ResolvedInRelease string     `json:"resolved_in_release,omitempty"`
+	IgnoreUntil       *time.Time `json:"ignore_until,omitempty"`
+	Regression        bool       `json:"regression"`
 }
 
 type Store struct {
@@ -177,6 +183,7 @@ type Store struct {
 	attachmentBodies map[string][]byte
 	signals          map[string]StoredSignal
 	releases         map[string]Release
+	alertRules       map[string]AlertRule
 }
 
 type EventStore interface {
@@ -200,7 +207,7 @@ type AttachmentReader interface {
 }
 
 func NewStore() *Store {
-	return &Store{PII: DefaultPIIConfig(), events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string), artifacts: NewArtifactStore(), attachments: make(map[string]Attachment), attachmentBodies: make(map[string][]byte), signals: make(map[string]StoredSignal), releases: make(map[string]Release)}
+	return &Store{PII: DefaultPIIConfig(), events: make(map[string]Event), issues: make(map[string]*Issue), groupToID: make(map[string]string), artifacts: NewArtifactStore(), attachments: make(map[string]Attachment), attachmentBodies: make(map[string][]byte), signals: make(map[string]StoredSignal), releases: make(map[string]Release), alertRules: make(map[string]AlertRule)}
 }
 
 func (s *Store) SetPIIConfig(config PIIConfig) { s.PII = config }
@@ -212,18 +219,20 @@ func (s *Store) SetArtifactStore(artifacts *ArtifactStore) {
 }
 
 type App struct {
-	Store         EventStore
-	Artifacts     *ArtifactStore
-	Control       ControlPlane
-	PII           PIIConfig
-	MaxEnvelope   int64
-	RelayToken    string
-	ArtifactToken string
-	ProjectKeys   map[string]map[string]struct{}
-	APITokens     map[string]string
-	CurrentUserID string
-	RateLimiter   *RateLimiter
-	Logger        *slog.Logger
+	Store          EventStore
+	Artifacts      *ArtifactStore
+	Control        ControlPlane
+	PII            PIIConfig
+	MaxEnvelope    int64
+	RelayToken     string
+	ArtifactToken  string
+	ProjectKeys    map[string]map[string]struct{}
+	APITokens      map[string]string
+	APITokenHashes map[string]string
+	CurrentUserID  string
+	RateLimiter    *RateLimiter
+	Logger         *slog.Logger
+	Metrics        *Metrics
 }
 
 func NewApp(store EventStore) *App {
@@ -249,7 +258,7 @@ func NewApp(store EventStore) *App {
 	if provider, ok := store.(ControlPlane); ok {
 		control = provider
 	}
-	app := &App{Store: store, Artifacts: artifacts, Control: control, PII: DefaultPIIConfig(), MaxEnvelope: DefaultMaxEnvelopeBytes, CurrentUserID: "1", Logger: slog.Default()}
+	app := &App{Store: store, Artifacts: artifacts, Control: control, PII: DefaultPIIConfig(), MaxEnvelope: DefaultMaxEnvelopeBytes, CurrentUserID: "1", Logger: slog.Default(), Metrics: DefaultMetrics}
 	app.SetPIIConfig(app.PII)
 	return app
 }
@@ -267,6 +276,20 @@ func (a *App) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health/live" {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+		if r.URL.Path == "/health/ready" {
+			if ready, ok := a.Store.(interface{ Ready(context.Context) error }); ok {
+				if err := ready.Ready(r.Context()); err != nil {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "error": err.Error()})
+					return
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+			return
+		}
+		if r.URL.Path == "/metrics" {
+			a.Metrics.ServeHTTP(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -289,14 +312,128 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleControlAPI(w, r, parts)
 		return
 	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodPut {
+		state, ok := a.Store.(IssueStateStore)
+		if !ok {
+			http.Error(w, "issue state unavailable", http.StatusNotImplemented)
+			return
+		}
+		var request struct {
+			Status            string `json:"status"`
+			ResolvedInRelease string `json:"resolved_in_release"`
+		}
+		if err := decodeJSONBody(r, &request); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		issue, err := state.SetIssueStatus(parts[3], request.Status, request.ResolvedInRelease)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, issue)
+		return
+	}
 	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodGet {
-		projectID := r.URL.Query().Get("project")
-		writeJSON(w, http.StatusOK, a.Store.ListIssues(projectID))
+		options := queryOptionsFromRequest(r)
+		if paged, ok := a.Store.(PagedStore); ok {
+			page := paged.ListIssuesPage(options)
+			writePageHeaders(w, page.NextCursor)
+			writeJSON(w, http.StatusOK, page.Items)
+			return
+		}
+		writeJSON(w, http.StatusOK, a.Store.ListIssues(options.ProjectID))
 		return
 	}
 	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "events" && r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, a.Store.ListEvents(r.URL.Query().Get("project"), r.URL.Query().Get("issue")))
+		options := queryOptionsFromRequest(r)
+		if paged, ok := a.Store.(PagedStore); ok {
+			page := paged.ListEventsPage(options)
+			writePageHeaders(w, page.NextCursor)
+			writeJSON(w, http.StatusOK, page.Items)
+			return
+		}
+		writeJSON(w, http.StatusOK, a.Store.ListEvents(options.ProjectID, options.IssueID))
 		return
+	}
+	if len(parts) == 5 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && parts[4] == "series" && r.Method == http.MethodGet {
+		if analytics, ok := a.Store.(AnalyticsStore); ok {
+			writeJSON(w, http.StatusOK, analytics.IssueSeries(r.URL.Query().Get("project"), parts[3], parseTimeQuery(r.URL.Query().Get("start")), parseTimeQuery(r.URL.Query().Get("end")), parseResolution(r.URL.Query().Get("resolution"))))
+			return
+		}
+		http.Error(w, "analytics unavailable", http.StatusNotImplemented)
+		return
+	}
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && parts[4] == "tags" && r.Method == http.MethodGet {
+		if analytics, ok := a.Store.(AnalyticsStore); ok {
+			writeJSON(w, http.StatusOK, analytics.IssueTagValues(r.URL.Query().Get("project"), parts[3], parts[5], parseTimeQuery(r.URL.Query().Get("start")), parseTimeQuery(r.URL.Query().Get("end")), 20))
+			return
+		}
+		http.Error(w, "analytics unavailable", http.StatusNotImplemented)
+		return
+	}
+	if len(parts) == 6 && parts[0] == "api" && parts[1] == "0" && parts[2] == "projects" && parts[5] == "stats" && r.Method == http.MethodGet {
+		if analytics, ok := a.Store.(AnalyticsStore); ok {
+			projectID := parts[4]
+			if project, ok := a.Control.GetProject(parts[3], parts[4]); ok {
+				projectID = project.ID
+			}
+			writeJSON(w, http.StatusOK, analytics.ProjectStats(projectID, parseTimeQuery(r.URL.Query().Get("start")), parseTimeQuery(r.URL.Query().Get("end"))))
+			return
+		}
+		http.Error(w, "analytics unavailable", http.StatusNotImplemented)
+		return
+	}
+	if len(parts) >= 6 && parts[0] == "api" && parts[1] == "0" && parts[2] == "projects" && parts[5] == "alert-rules" {
+		if !a.validControlToken(r) {
+			http.Error(w, "management authentication required", http.StatusUnauthorized)
+			return
+		}
+		alerts, ok := a.Store.(AlertStore)
+		if !ok {
+			http.Error(w, "alerts unavailable", http.StatusNotImplemented)
+			return
+		}
+		projectID := parts[4]
+		if project, found := a.Control.GetProject(parts[3], parts[4]); found {
+			projectID = project.ID
+		}
+		if len(parts) == 6 && r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, alerts.ListAlertRules(projectID))
+			return
+		}
+		if len(parts) == 6 && r.Method == http.MethodPost {
+			var rule AlertRule
+			if err := decodeJSONBody(r, &rule); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			rule.ProjectID = projectID
+			writeJSON(w, http.StatusCreated, alerts.CreateAlertRule(rule))
+			return
+		}
+		if len(parts) == 7 && r.Method == http.MethodPut {
+			var rule AlertRule
+			if err := decodeJSONBody(r, &rule); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			rule.ID, rule.ProjectID = parts[6], projectID
+			if updated, found := alerts.UpdateAlertRule(rule); found {
+				writeJSON(w, http.StatusOK, updated)
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
+		if len(parts) == 7 && r.Method == http.MethodDelete {
+			if alerts.DeleteAlertRule(projectID, parts[6]) {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
 	}
 	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "client-reports" && r.Method == http.MethodGet {
 		if extended, ok := a.Store.(ExtendedStore); ok {
@@ -417,10 +554,12 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	accepted, err := a.Store.Ingest(projectID, key, body)
 	if err != nil {
+		a.Metrics.Inc("sentryx_ingest_requests_total", map[string]string{"status": "error"})
 		a.Logger.Warn("envelope rejected", "error", err, "project_id", projectID)
 		http.Error(w, "invalid envelope", http.StatusBadRequest)
 		return
 	}
+	a.Metrics.Inc("sentryx_ingest_requests_total", map[string]string{"status": "accepted"})
 	w.Header().Set("X-SentryX-Accepted", fmt.Sprintf("%d", accepted))
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted})
 }
@@ -517,9 +656,14 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 			if issueID == "" {
 				issueID = shortHash(projectID + ":" + groupHash)
 				s.groupToID[projectID+":"+groupHash] = issueID
-				s.issues[issueID] = &Issue{ID: issueID, ProjectID: projectID, Title: event.Title, Level: event.Level, FirstSeen: now, GroupHash: groupHash}
+				s.issues[issueID] = &Issue{ID: issueID, ProjectID: projectID, Title: event.Title, Level: event.Level, FirstSeen: now, LastSeen: now, Status: "unresolved", StatusChangedAt: now, GroupHash: groupHash}
 			}
 			issue := s.issues[issueID]
+			if issue.Status == "resolved" {
+				issue.Status = "unresolved"
+				issue.StatusChangedAt = now
+				issue.Regression = true
+			}
 			issue.Count++
 			issue.LastSeen = now
 			issue.LatestEvent = event.EventID
@@ -919,6 +1063,7 @@ var (
 	dynamicNumber = regexp.MustCompile(`\b[0-9a-fA-F]{8,}\b|\b\d{2,}\b`)
 	dynamicUUID   = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f-]{27,}\b`)
 	dynamicURL    = regexp.MustCompile(`https?://[^\s]+`)
+	contentHash   = regexp.MustCompile(`(?i)([._-])[0-9a-f]{6,}(\.[a-z0-9]+)?$`)
 )
 
 func normalizeMessage(message string) string {
@@ -1020,6 +1165,7 @@ func decodeEvent(projectID string, payload []byte, now time.Time) (Event, error)
 	}
 	event.Extra = mapValue(raw["extra"])
 	event.Contexts = mapValue(raw["contexts"])
+	event.Tags = stringMapValue(raw["tags"])
 	event.Modules = stringMapValue(raw["modules"])
 	event.SDK = mapValue(raw["sdk"])
 	event.DebugMeta = mapValue(raw["debug_meta"])
@@ -1181,22 +1327,21 @@ func groupingHash(event Event) string {
 	if len(event.Fingerprint) > 0 && !containsDefault(event.Fingerprint) {
 		return "fp:" + strings.Join(event.Fingerprint, "|")
 	}
-	parts := []string{"v1", event.Platform, normalizeMessage(event.Message)}
+	if groupingVersion() == "v1" {
+		return groupingHashV1(event)
+	}
+	version := groupingVersion()
+	parts := []string{version, event.Platform, normalizeMessage(event.Message)}
 	if event.Exception != nil {
 		var ex exceptionValue
 		if json.Unmarshal(event.Exception, &ex) == nil {
 			parts = append(parts, ex.Type)
-			if len(event.SymbolicatedFrames) > 0 {
-				frame := event.SymbolicatedFrames[len(event.SymbolicatedFrames)-1]
-				parts = append(parts, normalizePath(frame.Filename), frame.Function)
-				return shortHash(strings.Join(parts, "\x00"))
+			frames := event.SymbolicatedFrames
+			if len(frames) == 0 {
+				frames = ex.Stacktrace.Frames
 			}
-			for i := len(ex.Stacktrace.Frames) - 1; i >= 0; i-- {
-				frame := ex.Stacktrace.Frames[i]
-				if frame.InApp || i == len(ex.Stacktrace.Frames)-1 {
-					parts = append(parts, normalizePath(frame.Filename), frame.Function)
-					break
-				}
+			for _, frame := range groupingFrames(frames) {
+				parts = append(parts, normalizePath(frame.Filename), strings.TrimSpace(frame.Function))
 			}
 		}
 	}
@@ -1204,6 +1349,68 @@ func groupingHash(event Event) string {
 		parts = append(parts, normalizePath(event.Culprit))
 	}
 	return shortHash(strings.Join(parts, "\x00"))
+}
+
+// groupingHashV1 is retained so existing issues remain addressable during a
+// rolling migration. Operators can opt into the improved v2 algorithm with
+// SENTRYX_GROUPING_VERSION=v2 and reconcile the two populations explicitly.
+func groupingHashV1(event Event) string {
+	parts := []string{"v1", event.Platform, normalizeMessage(event.Message)}
+	if event.Exception != nil {
+		var ex exceptionValue
+		if json.Unmarshal(event.Exception, &ex) == nil {
+			parts = append(parts, ex.Type)
+			if len(event.SymbolicatedFrames) > 0 {
+				frame := event.SymbolicatedFrames[len(event.SymbolicatedFrames)-1]
+				parts = append(parts, normalizePathV1(frame.Filename), frame.Function)
+				return shortHash(strings.Join(parts, "\x00"))
+			}
+			for i := len(ex.Stacktrace.Frames) - 1; i >= 0; i-- {
+				frame := ex.Stacktrace.Frames[i]
+				if frame.InApp || i == len(ex.Stacktrace.Frames)-1 {
+					parts = append(parts, normalizePathV1(frame.Filename), frame.Function)
+					break
+				}
+			}
+		}
+	}
+	if event.Culprit != "" {
+		parts = append(parts, normalizePathV1(event.Culprit))
+	}
+	return shortHash(strings.Join(parts, "\x00"))
+}
+
+func normalizePathV1(value string) string {
+	if parsed, err := url.Parse(value); err == nil && parsed.Path != "" {
+		value = parsed.Path
+	}
+	value = strings.TrimSuffix(value, ".js")
+	return strings.ReplaceAll(value, "\\", "/")
+}
+
+func groupingVersion() string {
+	if value := strings.TrimSpace(os.Getenv("SENTRYX_GROUPING_VERSION")); value != "" {
+		return value
+	}
+	return "v1"
+}
+
+func groupingFrames(frames []StackFrame) []StackFrame {
+	result := make([]StackFrame, 0, 3)
+	for index := len(frames) - 1; index >= 0 && len(result) < 3; index-- {
+		frame := frames[index]
+		if !frame.InApp && len(result) > 0 {
+			continue
+		}
+		if frame.Filename == "" && frame.Function == "" {
+			continue
+		}
+		result = append(result, frame)
+	}
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
+	}
+	return result
 }
 
 func containsDefault(values []string) bool {
@@ -1220,7 +1427,12 @@ func normalizePath(value string) string {
 		value = parsed.Path
 	}
 	value = strings.TrimSuffix(value, ".js")
-	return strings.ReplaceAll(value, "\\", "/")
+	value = strings.TrimSuffix(value, ".mjs")
+	value = strings.TrimSuffix(value, ".cjs")
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = contentHash.ReplaceAllString(value, "$1$2")
+	value = strings.ReplaceAll(value, "webpack-internal:///", "")
+	return value
 }
 
 func stringValue(value any) string {

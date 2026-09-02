@@ -67,7 +67,7 @@ func (p *PostgresStore) LeaseJobs(ctx context.Context, limit int, lease time.Dur
 }
 
 func (p *PostgresStore) AckJob(ctx context.Context, id int64) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE sentryx_ingest_jobs SET state='completed', lease_until=NULL, completed_at=now() WHERE id=$1`, id)
+	_, err := p.db.ExecContext(ctx, `UPDATE sentryx_ingest_jobs SET state='completed', payload=NULL, lease_until=NULL, completed_at=now() WHERE id=$1`, id)
 	return err
 }
 
@@ -93,7 +93,24 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 	if poll <= 0 {
 		poll = 250 * time.Millisecond
 	}
+	cleanupTicker := time.NewTicker(1 * time.Hour)
+	defer cleanupTicker.Stop()
+	alertTicker := time.NewTicker(30 * time.Second)
+	defer alertTicker.Stop()
 	for {
+		select {
+		case <-cleanupTicker.C:
+			if deleted, err := p.CleanupExpired(ctx, 30*24*time.Hour); err != nil {
+				fmt.Printf("sentryx retention cleanup failed: %v\n", err)
+			} else if deleted > 0 {
+				DefaultMetrics.Inc("sentryx_retention_deleted_total", map[string]string{"kind": "events"})
+			}
+		case <-alertTicker.C:
+			if err := p.EvaluateAlerts(ctx); err != nil {
+				DefaultMetrics.Inc("sentryx_alert_evaluation_errors_total", nil)
+			}
+		default:
+		}
 		jobs, err := p.LeaseJobs(ctx, batch, 30*time.Second)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -132,4 +149,34 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 		case <-time.After(poll):
 		}
 	}
+}
+
+// CleanupExpired removes event data outside the configured retention window.
+// A later partitioned deployment can replace these deletes without changing
+// the worker contract.
+func (p *PostgresStore) CleanupExpired(ctx context.Context, fallback time.Duration) (int64, error) {
+	if fallback <= 0 {
+		fallback = 30 * 24 * time.Hour
+	}
+	days := int(fallback / (24 * time.Hour))
+	if days < 1 {
+		days = 1
+	}
+	var deleted int64
+	queries := []string{
+		`DELETE FROM sentryx_events e WHERE e.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=e.project_id), $1))`,
+		`DELETE FROM sentryx_signals s WHERE s.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=s.project_id), $1))`,
+		`DELETE FROM sentryx_attachments a WHERE a.created_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=a.project_id), $1))`,
+		`DELETE FROM sentryx_client_reports c WHERE c.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=c.project_id), $1))`,
+		`DELETE FROM sentryx_ingest_jobs j WHERE j.state IN ('completed','dead') AND COALESCE(j.completed_at,j.received_at) < now()-make_interval(days => $1)`,
+	}
+	for _, query := range queries {
+		result, err := p.db.ExecContext(ctx, query, days)
+		if err != nil {
+			return deleted, err
+		}
+		count, _ := result.RowsAffected()
+		deleted += count
+	}
+	return deleted, nil
 }

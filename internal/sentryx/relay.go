@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -23,18 +25,26 @@ func NewRelay(upstream string, maxBody int64, relayToken string) http.Handler {
 // gzip bodies are decompressed, scrubbed, and forwarded uncompressed so the
 // server never needs to persist an unsanitized Envelope.
 func NewRelayWithConfig(upstream string, maxBody int64, relayToken string, piiConfig PIIConfig) http.Handler {
-	return NewRelayWithConfigAndMirror(upstream, "", maxBody, relayToken, "", piiConfig)
+	return NewRelayWithConfigAndMirrorAndPolicy(upstream, "", maxBody, relayToken, "", piiConfig, ItemPolicyFromEnv())
 }
 
 // NewRelayWithConfigAndMirror forwards the same Sentry-compatible request to
 // the primary upstream and, when configured, mirrors ingestion requests to a
 // second upstream. The primary response is never blocked by mirror failure.
 func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayToken, mirrorToken string, piiConfig PIIConfig) http.Handler {
+	return NewRelayWithConfigAndMirrorAndPolicy(upstream, mirror, maxBody, relayToken, mirrorToken, piiConfig, ItemPolicyFromEnv())
+}
+
+func NewRelayWithConfigAndMirrorAndPolicy(upstream, mirror string, maxBody int64, relayToken, mirrorToken string, piiConfig PIIConfig, itemPolicy ItemPolicy) http.Handler {
 	if maxBody <= 0 {
 		maxBody = DefaultMaxEnvelopeBytes
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	mirrorSlots := make(chan struct{}, 32)
+	spool := NewMirrorSpool(os.Getenv("SENTRYX_MIRROR_SPOOL_DIR"), mirrorToken)
+	if spool != nil {
+		go spool.Run(context.Background())
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			setCORSHeaders(w)
@@ -43,6 +53,14 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 		}
 		if r.URL.Path == "/health/live" {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+		if r.URL.Path == "/health/ready" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+			return
+		}
+		if r.URL.Path == "/metrics" {
+			DefaultMetrics.ServeHTTP(w, r)
 			return
 		}
 		setCORSHeaders(w)
@@ -58,6 +76,13 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 		}
 		if scrub {
 			body, err = ScrubEnvelope(body, piiConfig)
+			if err != nil {
+				http.Error(w, "invalid envelope", http.StatusBadRequest)
+				return
+			}
+		}
+		if isEnvelopePath(r.URL.Path) {
+			body, _, err = ApplyItemPolicy(body, itemPolicy)
 			if err != nil {
 				http.Error(w, "invalid envelope", http.StatusBadRequest)
 				return
@@ -80,7 +105,7 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 					go func() {
 						defer cancelMirror()
 						defer func() { <-mirrorSlots }()
-						mirrorRelayRequest(client, mirrorReq)
+						mirrorRelayRequest(client, mirrorReq, spool)
 					}()
 				default:
 					cancelMirror()
@@ -93,11 +118,13 @@ func NewRelayWithConfigAndMirror(upstream, mirror string, maxBody int64, relayTo
 		}
 		response, err := client.Do(req)
 		if err != nil {
+			DefaultMetrics.Inc("sentryx_relay_requests_total", map[string]string{"status": "error"})
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
 			return
 		}
 		defer response.Body.Close()
 		copyRelayResponseHeaders(w.Header(), response.Header)
+		DefaultMetrics.Inc("sentryx_relay_requests_total", map[string]string{"status": strconv.Itoa(response.StatusCode)})
 		w.WriteHeader(response.StatusCode)
 		_, _ = io.Copy(w, response.Body)
 	})
@@ -150,17 +177,37 @@ func isHopByHopHeader(key string) bool {
 	}
 }
 
-func mirrorRelayRequest(client *http.Client, request *http.Request) {
+func mirrorRelayRequest(client *http.Client, request *http.Request, spools ...*MirrorSpool) {
 	response, err := client.Do(request)
 	if err != nil {
+		if len(spools) > 0 && spools[0] != nil && request.GetBody != nil {
+			if body, bodyErr := request.GetBody(); bodyErr == nil {
+				data, _ := io.ReadAll(body)
+				body.Close()
+				_ = spools[0].Save(request, data)
+				DefaultMetrics.Inc("sentryx_mirror_spooled_total", nil)
+			}
+		}
+		DefaultMetrics.Inc("sentryx_mirror_requests_total", map[string]string{"status": "error"})
 		slog.Default().Warn("relay mirror failed", "error", err, "url", request.URL.Path)
 		return
 	}
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, response.Body)
 	if response.StatusCode >= http.StatusBadRequest {
+		if len(spools) > 0 && spools[0] != nil && request.GetBody != nil {
+			if body, bodyErr := request.GetBody(); bodyErr == nil {
+				data, _ := io.ReadAll(body)
+				body.Close()
+				_ = spools[0].Save(request, data)
+				DefaultMetrics.Inc("sentryx_mirror_spooled_total", nil)
+			}
+		}
+		DefaultMetrics.Inc("sentryx_mirror_requests_total", map[string]string{"status": "rejected"})
 		slog.Default().Warn("relay mirror rejected", "status", response.StatusCode, "url", request.URL.Path)
+		return
 	}
+	DefaultMetrics.Inc("sentryx_mirror_requests_total", map[string]string{"status": "accepted"})
 }
 
 func isEnvelopePath(value string) bool {

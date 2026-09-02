@@ -9,7 +9,10 @@ export type Organization = {
 export type ProjectKey = { id: string; name?: string; public: string; secret?: string; dsn: string }
 export type Team = { id: string; slug: string; name: string; dateCreated: string; memberCount?: number; hasAccess?: boolean }
 export type Project = { id: string; slug: string; name: string; platform?: string; dateCreated: string; teams?: Team[]; keys?: ProjectKey[] }
-export type Issue = { id: string; project_id: string; title: string; level?: string; count: number; first_seen: string; last_seen: string; latest_event_id: string; group_hash: string }
+export type Issue = { id: string; project_id: string; title: string; level?: string; count: number; first_seen: string; last_seen: string; latest_event_id: string; group_hash: string; status?: "resolved" | "unresolved" | "ignored"; regression?: boolean; resolved_in_release?: string }
+export type SeriesPoint = { bucket: string; count: number; users: number }
+export type AlertAction = { type: string; url?: string }
+export type AlertRule = { id: string; project_id: string; name: string; condition: string; threshold: number; window_minutes: number; cooldown_minutes: number; enabled: boolean; actions?: AlertAction[] }
 
 export type Breadcrumb = {
   timestamp?: string
@@ -113,8 +116,13 @@ export const api = {
   createProject: (org: string, data: { name: string; slug?: string; platform?: string }) =>
     apiFetch<Project>(`/api/0/organizations/${encodeURIComponent(org)}/projects/`, { method: "POST", body: JSON.stringify(data) }),
   project: (org: string, project: string) => apiFetch<Project>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}`),
-  issues: (project: string) => apiFetch<Issue[]>(`/api/0/issues?project=${encodeURIComponent(project)}`),
+  issues: (project: string, options: { status?: string; limit?: number; cursor?: string } = {}) => apiFetch<Issue[]>(`/api/0/issues?project=${encodeURIComponent(project)}${options.status && options.status !== "all" ? `&status=${encodeURIComponent(options.status)}` : ""}${options.limit ? `&limit=${options.limit}` : ""}${options.cursor ? `&cursor=${encodeURIComponent(options.cursor)}` : ""}`),
+  updateIssue: (issue: string, status: "resolved" | "unresolved" | "ignored", resolvedInRelease?: string) => apiFetch<Issue>(`/api/0/issues/${encodeURIComponent(issue)}`, { method: "PUT", body: JSON.stringify({ status, resolved_in_release: resolvedInRelease }) }),
   events: (project: string, issue?: string) => apiFetch<Event[]>(`/api/0/events?project=${encodeURIComponent(project)}${issue ? `&issue=${encodeURIComponent(issue)}` : ""}`),
+  issueSeries: (project: string, issue: string, resolution = "1h") => apiFetch<SeriesPoint[]>(`/api/0/issues/${encodeURIComponent(issue)}/series?project=${encodeURIComponent(project)}&resolution=${resolution}`),
+  projectStats: (org: string, project: string) => apiFetch<Record<string, number>>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/stats`),
+  alertRules: (org: string, project: string) => apiFetch<AlertRule[]>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/alert-rules`),
+  createAlertRule: (org: string, project: string, data: Partial<AlertRule>) => apiFetch<AlertRule>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/alert-rules`, { method: "POST", body: JSON.stringify(data) }),
   releases: (project: string) => apiFetch<Release[]>(`/api/0/projects/${encodeURIComponent(project)}/releases`),
   createRelease: (project: string, version: string) => apiFetch<Release>(`/api/0/projects/${encodeURIComponent(project)}/releases`, { method: "POST", body: JSON.stringify({ version }) }),
   artifacts: (project: string, release: string) => apiFetch<ArtifactInfo[]>(`/api/0/projects/${encodeURIComponent(project)}/releases/${encodeURIComponent(release)}/files`),

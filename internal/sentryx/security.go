@@ -1,6 +1,8 @@
 package sentryx
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"strconv"
 	"strings"
@@ -37,6 +39,29 @@ func ParseAPITokens(value string) map[string]string {
 		}
 	}
 	return result
+}
+
+// ParseAPITokenHashes accepts "sha256hex:user-id" entries. It is suitable
+// for production deployments where plaintext management tokens must not be
+// present in environment variables or process memory.
+func ParseAPITokenHashes(value string) map[string]string {
+	result := make(map[string]string)
+	for _, entry := range strings.Split(value, ",") {
+		hash, userID, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		if !ok || len(hash) != sha256.Size*2 {
+			continue
+		}
+		if _, err := hex.DecodeString(hash); err != nil {
+			continue
+		}
+		result[strings.ToLower(hash)] = strings.TrimSpace(userID)
+	}
+	return result
+}
+
+func HashAPIToken(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
 }
 
 func requestClientKey(remoteAddr string) string {

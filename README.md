@@ -89,6 +89,8 @@ PostgreSQL 运行模式：先执行 `migrations/001_init.sql`，再设置 `SENTR
 
 Source Map 存储通过 `SENTRYX_BLOB_BACKEND` 选择：`database`（默认，兼容旧 schema）、`file`（设置 `SENTRYX_BLOB_DIR`）或 `s3`。S3 模式需要 `SENTRYX_S3_ENDPOINT`、`SENTRYX_S3_ACCESS_KEY`、`SENTRYX_S3_SECRET_KEY`、`SENTRYX_S3_BUCKET`，可选 `SENTRYX_S3_REGION`、`SENTRYX_S3_PREFIX` 和 `SENTRYX_S3_SECURE`。切换已有 PostgreSQL 数据库前先执行 `migrations/002_blobstore.sql`；旧 Worker 可在滚动升级期间继续读取 BYTEA。
 
-生产接入可设置 `SENTRYX_PROJECT_KEYS=project:key,...` 开启项目公钥白名单，设置 `SENTRYX_ARTIFACT_TOKEN` 保护 Source Map、Release 和 Artifact 管理接口，并用 `SENTRYX_RATE_LIMIT_PER_MINUTE` 开启每个 project/key/client 的进程内限流；未设置时保持开发兼容模式。新增扩展 item 和附件/Client Report 数据表由 `migrations/003_extended_items.sql` 创建，Debug ID 索引由 `migrations/004_artifact_debug_id.sql` 创建。
+生产接入可设置 `SENTRYX_PROJECT_KEYS=project:key,...` 开启项目公钥白名单，设置 `SENTRYX_ARTIFACT_TOKEN` 保护 Source Map、Release 和 Artifact 管理接口，并用 `SENTRYX_RATE_LIMIT_PER_MINUTE` 开启每个 project/key/client 的进程内限流；未设置时保持开发兼容模式。新增扩展 item 和附件/Client Report 数据表由 `migrations/003_extended_items.sql` 创建，Debug ID 索引由 `migrations/004_artifact_debug_id.sql` 创建。Issue 生命周期、小时级统计、告警规则、保留期和队列 payload 清理由 `migrations/006_feature_request.sql` 创建。
+
+Relay 可通过 `SENTRYX_ITEM_POLICY=transaction:drop,session:drop,replay_event:store,profile:sample:25` 在边缘丢弃或采样非 error item；双写失败可设置 `SENTRYX_MIRROR_SPOOL_DIR` 开启磁盘重放。管理 token 推荐使用 `SENTRYX_API_TOKEN_HASHES=sha256hex:user-id`，明文 `SENTRYX_API_TOKENS` 仍用于兼容旧部署。查询分页、Issue 状态、分析和告警 API 详见 [`docs/FEATURE_REQUEST.md`](docs/FEATURE_REQUEST.md)。
 
 NUC 真实 SDK E2E 的启动、执行、数据库核对和重启恢复步骤见 [`docs/e2e-nuc.md`](docs/e2e-nuc.md)。

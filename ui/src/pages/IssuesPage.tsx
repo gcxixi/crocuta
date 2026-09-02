@@ -20,7 +20,7 @@ import {
   WarningOutlined,
   CheckCircleOutlined,
 } from "@ant-design/icons"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import type { ColumnsType } from "antd/es/table"
 import { api, type Issue } from "../api"
@@ -33,11 +33,17 @@ export function IssuesPage() {
   const [search, setSearch] = useState("")
   const [level, setLevel] = useState("all")
   const [status, setStatus] = useState("unresolved")
+  const queryClient = useQueryClient()
 
   const query = useQuery({
-    queryKey: ["issues", projectId],
-    queryFn: () => api.issues(projectId),
+    queryKey: ["issues", projectId, status],
+    queryFn: () => api.issues(projectId, { status, limit: 100 }),
     refetchInterval: 15000,
+  })
+
+  const statusMutation = useMutation({
+    mutationFn: ({ id, next }: { id: string; next: "resolved" | "unresolved" | "ignored" }) => api.updateIssue(id, next),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issues", projectId] }),
   })
 
   const projectQuery = useQuery({
@@ -55,7 +61,8 @@ export function IssuesPage() {
   const filteredIssues = rawIssues.filter((item) => {
     const matchSearch = !search || item.title.toLowerCase().includes(search.toLowerCase())
     const matchLevel = level === "all" || item.level === level
-    return matchSearch && matchLevel
+    const matchStatus = status === "all" || (item.status ?? "unresolved") === status
+    return matchSearch && matchLevel && matchStatus
   })
 
   const columns: ColumnsType<Issue> = [
@@ -110,6 +117,21 @@ export function IssuesPage() {
       render: (v: string) => <span style={{ fontSize: 12 }}>{formatTime(v)}</span>,
       sorter: (a, b) => new Date(a.last_seen).getTime() - new Date(b.last_seen).getTime(),
       defaultSortOrder: "descend",
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 130,
+      render: (value: Issue["status"], row) => (
+        <Select
+          size="small"
+          value={value ?? "unresolved"}
+          onChange={(next) => statusMutation.mutate({ id: row.id, next })}
+          options={[{ label: "未解决", value: "unresolved" }, { label: "已解决", value: "resolved" }, { label: "忽略", value: "ignored" }]}
+          onClick={(event) => event.stopPropagation()}
+          style={{ width: 100 }}
+        />
+      ),
     },
   ]
 

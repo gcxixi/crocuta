@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitea.home.arpa/sundust/sentryx/internal/sentryx"
+	"github.com/gcxixi/crocuta/internal/sentryx"
 )
 
 func main() {
@@ -74,6 +74,7 @@ func main() {
 	app.RelayToken = os.Getenv("SENTRYX_RELAY_TOKEN")
 	app.ArtifactToken = os.Getenv("SENTRYX_ARTIFACT_TOKEN")
 	app.APITokens = sentryx.ParseAPITokens(os.Getenv("SENTRYX_API_TOKENS"))
+	app.APITokenHashes = sentryx.ParseAPITokenHashes(os.Getenv("SENTRYX_API_TOKEN_HASHES"))
 	app.CurrentUserID = envOr("SENTRYX_CURRENT_USER_ID", "1")
 	app.ProjectKeys = sentryx.ParseProjectKeys(os.Getenv("SENTRYX_PROJECT_KEYS"))
 	if value := os.Getenv("SENTRYX_RATE_LIMIT_PER_MINUTE"); value != "" {

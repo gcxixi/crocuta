@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitea.home.arpa/sundust/sentryx/internal/sentryx"
+	"github.com/gcxixi/crocuta/internal/sentryx"
 )
 
 func main() {

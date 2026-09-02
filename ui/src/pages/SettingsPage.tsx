@@ -1,7 +1,7 @@
 import React from "react"
-import { Card, Descriptions, Empty, Space, Table, Tag, Typography } from "antd"
-import { KeyOutlined, SettingOutlined, TeamOutlined, LaptopOutlined } from "@ant-design/icons"
-import { useQuery } from "@tanstack/react-query"
+import { Button, Card, Descriptions, Empty, Form, Input, InputNumber, Space, Table, Tag, Typography } from "antd"
+import { AlertOutlined, KeyOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useParams } from "react-router-dom"
 import { api, type Project } from "../api"
 import { ErrorView, Loading, PageHeader, formatTime } from "../components/Common"
@@ -9,6 +9,7 @@ import { SdkQuickStart } from "../components/SdkQuickStart"
 
 export function SettingsPage() {
   const { projectId = "" } = useParams()
+  const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: ["project", "default", projectId],
     queryFn: () => api.project("default", projectId),
@@ -19,6 +20,11 @@ export function SettingsPage() {
 
   const project = query.data as Project
   const defaultDsn = project.keys?.[0]?.dsn
+  const alertQuery = useQuery({ queryKey: ["alert-rules", projectId], queryFn: () => api.alertRules("default", projectId) })
+  const alertMutation = useMutation({
+    mutationFn: (value: { name: string; threshold: number; window_minutes: number; url: string }) => api.createAlertRule("default", projectId, { ...value, condition: "count", enabled: true, cooldown_minutes: 30, actions: [{ type: "webhook", url: value.url }] }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["alert-rules", projectId] }),
+  })
 
   return (
     <>
@@ -106,6 +112,17 @@ export function SettingsPage() {
           ) : (
             <Typography.Text type="secondary">当前项目未关联特定团队，默认组织成员均可访问。</Typography.Text>
           )}
+        </Card>
+
+        <Card title={<Space><AlertOutlined style={{ color: "#6366f1" }} /><span>告警规则 (Alerts)</span></Space>} className="content-card">
+          <Form layout="inline" onFinish={(values) => alertMutation.mutate(values as { name: string; threshold: number; window_minutes: number; url: string })}>
+            <Form.Item name="name" rules={[{ required: true }]}><Input size="small" placeholder="规则名称" /></Form.Item>
+            <Form.Item name="threshold" initialValue={10}><InputNumber size="small" min={1} placeholder="阈值" /></Form.Item>
+            <Form.Item name="window_minutes" initialValue={60}><InputNumber size="small" min={1} placeholder="窗口(分钟)" /></Form.Item>
+            <Form.Item name="url" rules={[{ required: true, type: "url" }]}><Input size="small" placeholder="Webhook URL" style={{ width: 220 }} /></Form.Item>
+            <Form.Item><Button size="small" type="primary" htmlType="submit" loading={alertMutation.isPending}>新增</Button></Form.Item>
+          </Form>
+          <Table size="small" rowKey="id" pagination={false} style={{ marginTop: 12 }} dataSource={alertQuery.data ?? []} columns={[{ title: "名称", dataIndex: "name" }, { title: "条件", dataIndex: "condition" }, { title: "阈值", dataIndex: "threshold" }, { title: "状态", dataIndex: "enabled", render: (v: boolean) => <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag> }]} locale={{ emptyText: "暂无告警规则" }} />
         </Card>
 
         {/* Embedded SDK QuickStart */}

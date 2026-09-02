@@ -3,8 +3,10 @@ import {
   Button,
   Card,
   Empty,
+  Flex,
   Result,
   Space,
+  Statistic,
   Tag,
   Timeline,
   Typography,
@@ -13,7 +15,7 @@ import {
   ReloadOutlined,
   HistoryOutlined,
 } from "@ant-design/icons"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type Event } from "../api"
 import { ErrorView, Loading, PageHeader, formatTime, levelColor } from "../components/Common"
@@ -25,6 +27,7 @@ export function IssueDetailPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const selectedEventId = searchParams.get("event")
+  const queryClient = useQueryClient()
 
   const issuesQuery = useQuery({
     queryKey: ["issues", projectId],
@@ -35,6 +38,16 @@ export function IssueDetailPage() {
     queryKey: ["events", projectId, issueId],
     queryFn: () => api.events(projectId, issueId),
     refetchInterval: 15000,
+  })
+
+  const seriesQuery = useQuery({
+    queryKey: ["issue-series", projectId, issueId],
+    queryFn: () => api.issueSeries(projectId, issueId),
+  })
+
+  const statusMutation = useMutation({
+    mutationFn: (status: "resolved" | "unresolved" | "ignored") => api.updateIssue(issueId, status),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issues", projectId] }),
   })
 
   if (issuesQuery.isLoading || eventsQuery.isLoading) {
@@ -81,12 +94,26 @@ export function IssueDetailPage() {
             <Tag style={{ margin: 0 }}>
               累计 {issue.count} 次
             </Tag>
+            <Tag color={issue.status === "resolved" ? "green" : issue.status === "ignored" ? "gold" : "blue"} style={{ margin: 0 }}>
+              {issue.status === "resolved" ? "已解决" : issue.status === "ignored" ? "已忽略" : issue.regression ? "回归" : "未解决"}
+            </Tag>
+            <Button size="small" onClick={() => statusMutation.mutate(issue.status === "resolved" ? "unresolved" : "resolved")}>
+              {issue.status === "resolved" ? "重新打开" : "标记已解决"}
+            </Button>
             <Button size="small" icon={<ReloadOutlined />} onClick={() => void eventsQuery.refetch()}>
               刷新
             </Button>
           </Space>
         }
       />
+
+      <Card size="small" className="content-card mb12" title="错误趋势">
+        <Flex gap={24} wrap="wrap">
+          <Statistic title="时间桶" value={seriesQuery.data?.length ?? 0} />
+          <Statistic title="窗口事件" value={(seriesQuery.data ?? []).reduce((sum, item) => sum + item.count, 0)} />
+          <Statistic title="用户样本" value={(seriesQuery.data ?? []).reduce((sum, item) => sum + item.users, 0)} />
+        </Flex>
+      </Card>
 
       {/* TOP SECTION: Event Details (Left) + Vertical Event Timeline (Right) - Equal Height */}
       <div className="issue-top-grid">

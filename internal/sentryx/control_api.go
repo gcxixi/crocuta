@@ -19,7 +19,15 @@ func (a *App) isControlAPI(parts []string) bool {
 		return true
 	case "projects":
 		// /api/0/projects/{id}/releases is the legacy release API.
-		return len(parts) >= 5 && parts[4] != "releases"
+		if len(parts) < 5 || parts[4] == "releases" {
+			return false
+		}
+		// Product analytics and alert rules are event-store APIs, not control-plane
+		// endpoints, even though they share the project URL prefix.
+		if len(parts) >= 6 && (parts[5] == "stats" || parts[5] == "alert-rules") {
+			return false
+		}
+		return true
 	default:
 		return false
 	}
@@ -183,7 +191,12 @@ func (a *App) validControlToken(r *http.Request) bool {
 		}
 	}
 	if len(a.APITokens) > 0 {
-		_, ok := a.APITokens[token]
+		if _, ok := a.APITokens[token]; ok {
+			return true
+		}
+	}
+	if len(a.APITokenHashes) > 0 {
+		_, ok := a.APITokenHashes[HashAPIToken(token)]
 		return ok
 	}
 	if a.ArtifactToken != "" {

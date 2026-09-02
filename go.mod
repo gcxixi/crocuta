@@ -1,4 +1,4 @@
-module gitea.home.arpa/sundust/sentryx
+module github.com/gcxixi/crocuta
 
 go 1.24.0
 
