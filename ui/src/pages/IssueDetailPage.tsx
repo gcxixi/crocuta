@@ -1,12 +1,13 @@
-import React from "react"
+import React, { useMemo, useState } from "react"
 import {
   Button,
   Card,
   Empty,
   Flex,
   Result,
+  Progress,
+  Segmented,
   Space,
-  Statistic,
   Tag,
   Timeline,
   Typography,
@@ -15,12 +16,20 @@ import {
   ReloadOutlined,
   HistoryOutlined,
 } from "@ant-design/icons"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type Event } from "../api"
 import { ErrorView, Loading, PageHeader, formatTime, levelColor } from "../components/Common"
 import { StackTrace } from "../components/StackTrace"
 import { EventContextView } from "../components/EventContextView"
+import { SeriesChart } from "../components/SeriesChart"
+
+const trendWindows = {
+  "24h": { duration: 24 * 60 * 60 * 1000, resolution: "1h" },
+  "7d": { duration: 7 * 24 * 60 * 60 * 1000, resolution: "1h" },
+  "30d": { duration: 30 * 24 * 60 * 60 * 1000, resolution: "1d" },
+} as const
+const tagDimensions = ["browser.name", "os.name", "release", "url"]
 
 export function IssueDetailPage() {
   const { projectId = "", issueId = "" } = useParams()
@@ -28,10 +37,15 @@ export function IssueDetailPage() {
   const [searchParams] = useSearchParams()
   const selectedEventId = searchParams.get("event")
   const queryClient = useQueryClient()
+  const [trendWindow, setTrendWindow] = useState<keyof typeof trendWindows>("24h")
+  const range = useMemo(() => {
+    const end = new Date()
+    return { start: new Date(end.getTime() - trendWindows[trendWindow].duration).toISOString(), end: end.toISOString(), resolution: trendWindows[trendWindow].resolution }
+  }, [trendWindow])
 
-  const issuesQuery = useQuery({
-    queryKey: ["issues", projectId],
-    queryFn: () => api.issues(projectId),
+  const issueQuery = useQuery({
+    queryKey: ["issue", projectId, issueId],
+    queryFn: () => api.issue(projectId, issueId),
   })
 
   const eventsQuery = useQuery({
@@ -41,23 +55,27 @@ export function IssueDetailPage() {
   })
 
   const seriesQuery = useQuery({
-    queryKey: ["issue-series", projectId, issueId],
-    queryFn: () => api.issueSeries(projectId, issueId),
+    queryKey: ["issue-series", projectId, issueId, range],
+    queryFn: () => api.issueSeries(projectId, issueId, range),
   })
+  const tagQueries = useQueries({ queries: tagDimensions.map((key) => ({
+    queryKey: ["issue-tags", projectId, issueId, key, range.start, range.end],
+    queryFn: () => api.issueTagValues(projectId, issueId, key, { start: range.start, end: range.end, limit: 8 }),
+  })) })
 
   const statusMutation = useMutation({
     mutationFn: (status: "resolved" | "unresolved" | "ignored") => api.updateIssue(issueId, status),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issues", projectId] }),
   })
 
-  if (issuesQuery.isLoading || eventsQuery.isLoading) {
+  if (issueQuery.isLoading || eventsQuery.isLoading) {
     return <Loading tip="正在加载 Issue 详情与事件列表..." />
   }
 
-  if (issuesQuery.isError) return <ErrorView error={issuesQuery.error as Error} />
+  if (issueQuery.isError) return <ErrorView error={issueQuery.error as Error} />
   if (eventsQuery.isError) return <ErrorView error={eventsQuery.error as Error} />
 
-  const issue = issuesQuery.data?.find((item) => item.id === issueId)
+  const issue = issueQuery.data
   if (!issue) {
     return (
       <Result
@@ -107,12 +125,18 @@ export function IssueDetailPage() {
         }
       />
 
-      <Card size="small" className="content-card mb12" title="错误趋势">
-        <Flex gap={24} wrap="wrap">
-          <Statistic title="时间桶" value={seriesQuery.data?.length ?? 0} />
-          <Statistic title="窗口事件" value={(seriesQuery.data ?? []).reduce((sum, item) => sum + item.count, 0)} />
-          <Statistic title="用户样本" value={(seriesQuery.data ?? []).reduce((sum, item) => sum + item.users, 0)} />
-        </Flex>
+      <Card size="small" className="content-card mb12" title="错误趋势" extra={<Segmented size="small" value={trendWindow} onChange={(value) => setTrendWindow(value as keyof typeof trendWindows)} options={[{ label: "24h", value: "24h" }, { label: "7d", value: "7d" }, { label: "30d", value: "30d" }]} />}>
+        <SeriesChart data={seriesQuery.data ?? []} />
+      </Card>
+
+      <Card size="small" className="content-card mb12" title="影响维度">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 }}>
+          {tagDimensions.map((key, index) => {
+            const values = tagQueries[index].data ?? []
+            const total = values.reduce((sum, item) => sum + item.count, 0)
+            return <div key={key}><Typography.Text strong>{key}</Typography.Text>{values.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" /> : values.map((item) => <div key={item.value} style={{ marginTop: 8, cursor: "pointer" }} onClick={() => navigate(`/projects/${encodeURIComponent(projectId)}/issues?${key === "environment" || key === "release" ? `${encodeURIComponent(key)}=${encodeURIComponent(item.value)}` : `query=${encodeURIComponent(`${key}:${item.value}`)}`}`)}><Flex justify="space-between"><Typography.Text ellipsis={{ tooltip: item.value }} style={{ maxWidth: 180 }}>{item.value}</Typography.Text><Typography.Text type="secondary">{item.count}</Typography.Text></Flex><Progress percent={total ? Math.round(item.count * 100 / total) : 0} showInfo={false} size="small" /></div>)}</div>
+          })}
+        </div>
       </Card>
 
       {/* TOP SECTION: Event Details (Left) + Vertical Event Timeline (Right) - Equal Height */}

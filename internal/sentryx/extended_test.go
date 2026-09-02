@@ -377,6 +377,12 @@ func TestCORSSupportsAllMethods(t *testing.T) {
 			t.Fatalf("CORS methods %q missing %q", methods, expectedMethod)
 		}
 	}
+	exposed := resp.Header.Get("Access-Control-Expose-Headers")
+	for _, expectedHeader := range []string{"X-Next-Cursor", "Link", "X-SentryX-Accepted"} {
+		if !strings.Contains(exposed, expectedHeader) {
+			t.Fatalf("CORS exposed headers %q missing %q", exposed, expectedHeader)
+		}
+	}
 }
 
 func TestPIIScrubEventSafeFieldsAndSecretPrecompilation(t *testing.T) {

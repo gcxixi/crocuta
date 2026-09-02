@@ -226,6 +226,18 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			continue
 		}
 		_, _ = tx.Exec(`INSERT INTO sentryx_grouping_hashes (project_id, grouping_version, group_hash, issue_id, components) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, projectID, groupVersion, groupHash, returnedIssueID, mustJSON(GroupingComponents(event, groupingVersion())))
+		if identity := eventUserIdentity(event); identity != "" {
+			result, err := tx.Exec(`INSERT INTO sentryx_issue_users (project_id,issue_id,user_key,first_seen,last_seen) VALUES ($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING`, projectID, returnedIssueID, identity, event.ReceivedAt)
+			if err != nil {
+				tx.Rollback()
+				return accepted, err
+			}
+			if rows, _ := result.RowsAffected(); rows > 0 {
+				_, _ = tx.Exec(`UPDATE sentryx_issues SET users=users+1 WHERE id=$1`, returnedIssueID)
+			} else {
+				_, _ = tx.Exec(`UPDATE sentryx_issue_users SET first_seen=LEAST(first_seen,$4),last_seen=GREATEST(last_seen,$4) WHERE project_id=$1 AND issue_id=$2 AND user_key=$3`, projectID, returnedIssueID, identity, event.ReceivedAt)
+			}
+		}
 		bucket := event.ReceivedAt.UTC().Truncate(time.Hour)
 		for key, value := range event.Tags {
 			if value == "" {
@@ -293,7 +305,7 @@ func (p *PostgresStore) persistAttachment(projectID string, item envelopeItem, n
 }
 
 func (p *PostgresStore) ListIssues(projectID string) []Issue {
-	rows, err := p.db.Query(`SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window FROM sentryx_issues WHERE ($1 = '' OR project_id=$1) ORDER BY last_seen DESC`, projectID)
+	rows, err := p.db.Query(`SELECT id, project_id, title, level, count, users, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window FROM sentryx_issues WHERE ($1 = '' OR project_id=$1) ORDER BY last_seen DESC`, projectID)
 	if err != nil {
 		return nil
 	}
@@ -301,11 +313,17 @@ func (p *PostgresStore) ListIssues(projectID string) []Issue {
 	result := make([]Issue, 0)
 	for rows.Next() {
 		var issue Issue
-		if err := rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow); err == nil {
+		if err := rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.Users, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow); err == nil {
 			result = append(result, issue)
 		}
 	}
 	return result
+}
+
+func (p *PostgresStore) GetIssue(projectID, issueID string) (Issue, bool) {
+	var issue Issue
+	err := p.db.QueryRow(`SELECT id,project_id,title,level,count,users,first_seen,last_seen,latest_event_id,group_hash,status,status_changed_at,COALESCE(resolved_in_release,''),ignore_until,regression,ignore_count,ignore_window FROM sentryx_issues WHERE id=$1 AND ($2='' OR project_id=$2)`, issueID, projectID).Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.Users, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow)
+	return issue, err == nil
 }
 
 func (p *PostgresStore) ListEvents(projectID, issueID string) []Event {
@@ -328,22 +346,32 @@ func (p *PostgresStore) ListEvents(projectID, issueID string) []Event {
 func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 	options = defaultQueryOptions(options)
 	args := []any{options.ProjectID}
-	where := []string{"($1 = '' OR project_id=$1)"}
+	where := []string{"($1 = '' OR i.project_id=$1)"}
 	add := func(value any, clause string) {
 		args = append(args, value)
 		where = append(where, strings.Replace(clause, "?", fmt.Sprintf("$%d", len(args)), 1))
 	}
 	if !options.Start.IsZero() {
-		add(options.Start, "last_seen >= ?")
+		add(options.Start, "i.last_seen >= ?")
 	}
 	if !options.End.IsZero() {
-		add(options.End, "first_seen < ?")
+		add(options.End, "i.first_seen < ?")
 	}
 	if options.Level != "" {
-		add(options.Level, "level = ?")
+		add(options.Level, "i.level = ?")
 	}
 	if options.Status != "" {
-		add(options.Status, "status = ?")
+		add(options.Status, "i.status = ?")
+	}
+	addEventDimension := func(field, value string) {
+		args = append(args, value)
+		where = append(where, fmt.Sprintf("EXISTS (SELECT 1 FROM sentryx_events fe WHERE fe.project_id=i.project_id AND fe.issue_id=i.id AND fe.canonical_json->>'%s'=$%d)", field, len(args)))
+	}
+	if options.Environment != "" {
+		addEventDimension("environment", options.Environment)
+	}
+	if options.Release != "" {
+		addEventDimension("release", options.Release)
 	}
 	if options.Query != "" {
 		for _, token := range strings.Fields(options.Query) {
@@ -351,14 +379,17 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 			if len(parts) == 2 {
 				switch strings.ToLower(parts[0]) {
 				case "is":
-					add(parts[1], "status = ?")
+					add(parts[1], "i.status = ?")
 				case "level":
-					add(parts[1], "level = ?")
+					add(parts[1], "i.level = ?")
 				case "title":
-					add("%"+parts[1]+"%", "title ILIKE ?")
+					add("%"+parts[1]+"%", "i.title ILIKE ?")
+				default:
+					args = append(args, parts[0], parts[1])
+					where = append(where, fmt.Sprintf("EXISTS (SELECT 1 FROM sentryx_issue_tag_values_hourly tf WHERE tf.project_id=i.project_id AND tf.issue_id=i.id AND tf.tag_key=$%d AND tf.tag_value=$%d)", len(args)-1, len(args)))
 				}
 			} else {
-				add("%"+token+"%", "title ILIKE ?")
+				add("%"+token+"%", "i.title ILIKE ?")
 			}
 		}
 	}
@@ -367,7 +398,7 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 		case "first_seen":
 			if parsed, err := time.Parse(time.RFC3339Nano, key); err == nil {
 				args = append(args, parsed, id)
-				where = append(where, fmt.Sprintf("(first_seen < $%d OR (first_seen = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
+				where = append(where, fmt.Sprintf("(i.first_seen < $%d OR (i.first_seen = $%d AND i.id < $%d))", len(args)-1, len(args)-1, len(args)))
 			}
 		case "count":
 			countKey := strings.TrimLeft(key, "0")
@@ -376,7 +407,7 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 			}
 			if parsed, err := strconv.ParseInt(countKey, 10, 64); err == nil {
 				args = append(args, parsed, id)
-				where = append(where, fmt.Sprintf("(count < $%d OR (count = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
+				where = append(where, fmt.Sprintf("(i.count < $%d OR (i.count = $%d AND i.id < $%d))", len(args)-1, len(args)-1, len(args)))
 			}
 		case "users":
 			usersKey := strings.TrimLeft(key, "0")
@@ -385,28 +416,26 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 			}
 			if parsed, err := strconv.ParseInt(usersKey, 10, 64); err == nil {
 				args = append(args, parsed, id)
-				where = append(where, fmt.Sprintf("((SELECT count(DISTINCT CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id') WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END) FROM sentryx_events e WHERE e.issue_id=sentryx_issues.id) < $%d OR ((SELECT count(DISTINCT CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id') WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END) FROM sentryx_events e WHERE e.issue_id=sentryx_issues.id) = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
+				where = append(where, fmt.Sprintf("(i.users < $%d OR (i.users = $%d AND i.id < $%d))", len(args)-1, len(args)-1, len(args)))
 			}
 		default:
 			if parsed, err := time.Parse(time.RFC3339Nano, key); err == nil {
 				args = append(args, parsed, id)
-				where = append(where, fmt.Sprintf("(last_seen < $%d OR (last_seen = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
+				where = append(where, fmt.Sprintf("(i.last_seen < $%d OR (i.last_seen = $%d AND i.id < $%d))", len(args)-1, len(args)-1, len(args)))
 			}
 		}
 	}
-	order := "last_seen DESC, id DESC"
+	order := "i.last_seen DESC, i.id DESC"
 	if options.Sort == "first_seen" {
-		order = "first_seen DESC, id DESC"
+		order = "i.first_seen DESC, i.id DESC"
 	}
 	if options.Sort == "count" {
-		order = "count DESC, id DESC"
+		order = "i.count DESC, i.id DESC"
 	}
-	usersExpr := "0"
 	if options.Sort == "users" {
-		usersExpr = `(SELECT count(DISTINCT CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id') WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END) FROM sentryx_events e WHERE e.issue_id=sentryx_issues.id)`
-		order = usersExpr + " DESC, id DESC"
+		order = "i.users DESC, i.id DESC"
 	}
-	query := `SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window, ` + usersExpr + ` AS users FROM sentryx_issues WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)+1)
+	query := `SELECT i.id, i.project_id, i.title, i.level, i.count, i.first_seen, i.last_seen, i.latest_event_id, i.group_hash, i.status, i.status_changed_at, COALESCE(i.resolved_in_release,''), i.ignore_until, i.regression, i.ignore_count, i.ignore_window, i.users FROM sentryx_issues i WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)+1)
 	args = append(args, options.Limit+1)
 	rows, err := p.db.Query(query, args...)
 	if err != nil {
@@ -487,7 +516,7 @@ func (p *PostgresStore) SetIssueStatus(issueID, status, resolvedInRelease string
 		return Issue{}, fmt.Errorf("invalid issue status")
 	}
 	var issue Issue
-	err := p.db.QueryRow(`UPDATE sentryx_issues SET status=$1,status_changed_at=now(),resolved_in_release=NULLIF($2,''),regression=false,ignore_count=ignore_count+CASE WHEN $1='ignored' THEN 1 ELSE 0 END WHERE id=$3 RETURNING id,project_id,title,level,count,first_seen,last_seen,latest_event_id,group_hash,status,status_changed_at,COALESCE(resolved_in_release,''),ignore_until,regression,ignore_count,ignore_window`, status, resolvedInRelease, issueID).Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow)
+	err := p.db.QueryRow(`UPDATE sentryx_issues SET status=$1,status_changed_at=now(),resolved_in_release=NULLIF($2,''),regression=false,ignore_count=ignore_count+CASE WHEN $1='ignored' THEN 1 ELSE 0 END WHERE id=$3 RETURNING id,project_id,title,level,count,users,first_seen,last_seen,latest_event_id,group_hash,status,status_changed_at,COALESCE(resolved_in_release,''),ignore_until,regression,ignore_count,ignore_window`, status, resolvedInRelease, issueID).Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.Users, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow)
 	return issue, err
 }
 

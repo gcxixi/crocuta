@@ -43,6 +43,7 @@ import { ReleasesPage } from "../pages/ReleasesPage"
 import { SignalsPage } from "../pages/SignalsPage"
 import { ReportsPage } from "../pages/ReportsPage"
 import { SettingsPage } from "../pages/SettingsPage"
+import { ProjectOverviewPage } from "../pages/ProjectOverviewPage"
 
 export function AppShell() {
   const location = useLocation()
@@ -81,6 +82,12 @@ export function AppShell() {
 
   const navItems = [
     {
+      key: "overview",
+      icon: <HomeOutlined />,
+      label: "Overview",
+      path: `/projects/${encodeURIComponent(selectedProject)}`,
+    },
+    {
       key: "issues",
       icon: <BugOutlined />,
       label: "Issues",
@@ -112,7 +119,7 @@ export function AppShell() {
     },
   ]
 
-  const activeKey = navItems.find((item) => location.pathname.includes(`/${item.key}`))?.key ?? "issues"
+  const activeKey = navItems.find((item) => item.key !== "overview" && location.pathname.includes(`/${item.key}`))?.key ?? (location.pathname.match(/^\/projects\/[^/]+\/?$/) ? "overview" : "issues")
 
   if (projectsQuery.isLoading) return <Loading tip="正在连接 SentryX 控制台..." />
   if (projectsQuery.isError) {
@@ -206,6 +213,7 @@ export function AppShell() {
 
         <Layout.Content className="app-content">
           <Routes>
+            <Route path="/projects/:projectId" element={<ProjectOverviewPage />} />
             <Route path="/projects/:projectId/issues" element={<IssuesPage />} />
             <Route path="/projects/:projectId/issues/:issueId" element={<IssueDetailPage />} />
             <Route path="/projects/:projectId/releases" element={<ReleasesPage />} />

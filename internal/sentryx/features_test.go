@@ -110,6 +110,16 @@ func TestIssueLifecyclePaginationAndAnalytics(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("X-Next-Cursor") == "" {
 		t.Fatalf("status=%d headers=%v", response.Code, response.Header())
 	}
+	if link := response.Header().Get("Link"); !strings.HasPrefix(link, "</api/0/issues?") || !strings.Contains(link, `rel="next"`) {
+		t.Fatalf("invalid RFC 8288 Link header %q", link)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/0/issues/"+page.Items[0].ID+"?project=1", nil)
+	response = httptest.NewRecorder()
+	NewApp(store).Handler().ServeHTTP(response, request)
+	var detail Issue
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &detail) != nil || detail.ID != page.Items[0].ID || detail.Users != 1 {
+		t.Fatalf("detail status=%d body=%s", response.Code, response.Body.String())
+	}
 	request = httptest.NewRequest(http.MethodGet, "/api/0/issues/"+issue.ID+"/series?project=1&resolution=24h", nil)
 	response = httptest.NewRecorder()
 	NewApp(store).Handler().ServeHTTP(response, request)
@@ -123,6 +133,31 @@ func TestIssueLifecyclePaginationAndAnalytics(t *testing.T) {
 	var apiTags []TagValueCount
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &apiTags) != nil || len(apiTags) != 1 {
 		t.Fatalf("tags route status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestIssueListFiltersTagsDimensionsAndAlwaysReturnsUsers(t *testing.T) {
+	store := NewStore()
+	for index, environment := range []string{"production", "staging"} {
+		payload, _ := json.Marshal(map[string]any{
+			"event_id": strings.Repeat(string(rune('c'+index)), 32), "message": environment,
+			"environment": environment, "release": "web@" + itoa(index+1),
+			"tags": map[string]string{"browser.name": []string{"Chrome", "Firefox"}[index]},
+			"user": map[string]string{"id": "user-" + itoa(index)},
+		})
+		if _, err := store.Ingest("1", "", testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(payload))+`}`, payload))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, options := range map[string]QueryOptions{
+		"tag":         {ProjectID: "1", Query: "browser.name:Chrome"},
+		"environment": {ProjectID: "1", Environment: "production"},
+		"release":     {ProjectID: "1", Release: "web@1"},
+	} {
+		page := store.ListIssuesPage(options)
+		if len(page.Items) != 1 || page.Items[0].Title != "production" || page.Items[0].Users != 1 {
+			t.Fatalf("%s page=%#v", name, page)
+		}
 	}
 }
 

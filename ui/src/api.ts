@@ -9,10 +9,13 @@ export type Organization = {
 export type ProjectKey = { id: string; name?: string; public: string; secret?: string; dsn: string }
 export type Team = { id: string; slug: string; name: string; dateCreated: string; memberCount?: number; hasAccess?: boolean }
 export type Project = { id: string; slug: string; name: string; platform?: string; dateCreated: string; teams?: Team[]; keys?: ProjectKey[] }
-export type Issue = { id: string; project_id: string; title: string; level?: string; count: number; first_seen: string; last_seen: string; latest_event_id: string; group_hash: string; status?: "resolved" | "unresolved" | "ignored"; regression?: boolean; resolved_in_release?: string }
+export type Issue = { id: string; project_id: string; title: string; level?: string; count: number; users: number; first_seen: string; last_seen: string; latest_event_id: string; group_hash: string; status?: "resolved" | "unresolved" | "ignored"; regression?: boolean; resolved_in_release?: string }
 export type SeriesPoint = { bucket: string; count: number; users: number }
+export type TagValueCount = { value: string; count: number }
 export type AlertAction = { type: string; url?: string }
-export type AlertRule = { id: string; project_id: string; name: string; condition: string; threshold: number; window_minutes: number; cooldown_minutes: number; enabled: boolean; actions?: AlertAction[] }
+export type AlertRule = { id: string; project_id: string; name: string; condition: "new_issue" | "regression" | "count"; threshold: number; window_minutes: number; cooldown_minutes: number; enabled: boolean; filters?: Record<string, string>; actions?: AlertAction[] }
+export type Page<T> = { data: T[]; nextCursor?: string }
+export type IssueQueryOptions = { status?: string; level?: string; query?: string; environment?: string; release?: string; sort?: string; start?: string; end?: string; limit?: number; cursor?: string }
 
 export type Breadcrumb = {
   timestamp?: string
@@ -110,19 +113,42 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   return response.json() as Promise<T>
 }
 
+export async function apiFetchPage<T>(path: string, init: RequestInit = {}): Promise<Page<T>> {
+  const headers = new Headers(init.headers)
+  headers.set("Accept", "application/json")
+  if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`)
+  const response = await fetch(`${apiBase}${path}`, { ...init, headers })
+  if (!response.ok) throw new Error((await response.text()) || `${response.status} ${response.statusText}`)
+  return { data: await response.json() as T[], nextCursor: response.headers.get("X-Next-Cursor") || undefined }
+}
+
+function withQuery(path: string, values: Record<string, string | number | undefined>) {
+  const query = new URLSearchParams()
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== undefined && value !== "" && value !== "all") query.set(key, String(value))
+  })
+  const encoded = query.toString()
+  return encoded ? `${path}?${encoded}` : path
+}
+
 export const api = {
   organizations: () => apiFetch<Organization[]>("/api/0/organizations/"),
   projects: (org: string) => apiFetch<Project[]>(`/api/0/organizations/${encodeURIComponent(org)}/projects/`),
   createProject: (org: string, data: { name: string; slug?: string; platform?: string }) =>
     apiFetch<Project>(`/api/0/organizations/${encodeURIComponent(org)}/projects/`, { method: "POST", body: JSON.stringify(data) }),
   project: (org: string, project: string) => apiFetch<Project>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}`),
-  issues: (project: string, options: { status?: string; limit?: number; cursor?: string } = {}) => apiFetch<Issue[]>(`/api/0/issues?project=${encodeURIComponent(project)}${options.status && options.status !== "all" ? `&status=${encodeURIComponent(options.status)}` : ""}${options.limit ? `&limit=${options.limit}` : ""}${options.cursor ? `&cursor=${encodeURIComponent(options.cursor)}` : ""}`),
+  issuesPage: (project: string, options: IssueQueryOptions = {}) => apiFetchPage<Issue>(withQuery("/api/0/issues", { project, ...options })),
+  issues: async (project: string, options: IssueQueryOptions = {}) => (await apiFetchPage<Issue>(withQuery("/api/0/issues", { project, ...options }))).data,
+  issue: (project: string, issue: string) => apiFetch<Issue>(withQuery(`/api/0/issues/${encodeURIComponent(issue)}`, { project })),
   updateIssue: (issue: string, status: "resolved" | "unresolved" | "ignored", resolvedInRelease?: string) => apiFetch<Issue>(`/api/0/issues/${encodeURIComponent(issue)}`, { method: "PUT", body: JSON.stringify({ status, resolved_in_release: resolvedInRelease }) }),
   events: (project: string, issue?: string) => apiFetch<Event[]>(`/api/0/events?project=${encodeURIComponent(project)}${issue ? `&issue=${encodeURIComponent(issue)}` : ""}`),
-  issueSeries: (project: string, issue: string, resolution = "1h") => apiFetch<SeriesPoint[]>(`/api/0/issues/${encodeURIComponent(issue)}/series?project=${encodeURIComponent(project)}&resolution=${resolution}`),
-  projectStats: (org: string, project: string) => apiFetch<Record<string, number>>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/stats`),
+  issueSeries: (project: string, issue: string, options: { resolution?: string; start?: string; end?: string } = {}) => apiFetch<SeriesPoint[]>(withQuery(`/api/0/issues/${encodeURIComponent(issue)}/series`, { project, resolution: options.resolution ?? "1h", start: options.start, end: options.end })),
+  issueTagValues: (project: string, issue: string, key: string, options: { start?: string; end?: string; limit?: number } = {}) => apiFetch<TagValueCount[]>(withQuery(`/api/0/issues/${encodeURIComponent(issue)}/tags/${encodeURIComponent(key)}/`, { project, ...options })),
+  projectStats: (org: string, project: string, options: { start?: string; end?: string } = {}) => apiFetch<Record<string, number>>(withQuery(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/stats`, options)),
   alertRules: (org: string, project: string) => apiFetch<AlertRule[]>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/alert-rules`),
   createAlertRule: (org: string, project: string, data: Partial<AlertRule>) => apiFetch<AlertRule>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/alert-rules`, { method: "POST", body: JSON.stringify(data) }),
+  updateAlertRule: (org: string, project: string, id: string, data: Partial<AlertRule>) => apiFetch<AlertRule>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/alert-rules/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteAlertRule: (org: string, project: string, id: string) => apiFetch<void>(`/api/0/projects/${encodeURIComponent(org)}/${encodeURIComponent(project)}/alert-rules/${encodeURIComponent(id)}`, { method: "DELETE" }),
   releases: (project: string) => apiFetch<Release[]>(`/api/0/projects/${encodeURIComponent(project)}/releases`),
   createRelease: (project: string, version: string) => apiFetch<Release>(`/api/0/projects/${encodeURIComponent(project)}/releases`, { method: "POST", body: JSON.stringify({ version }) }),
   artifacts: (project: string, release: string) => apiFetch<ArtifactInfo[]>(`/api/0/projects/${encodeURIComponent(project)}/releases/${encodeURIComponent(release)}/files`),

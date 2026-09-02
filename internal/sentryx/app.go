@@ -160,7 +160,7 @@ type Issue struct {
 	Title             string     `json:"title"`
 	Level             string     `json:"level,omitempty"`
 	Count             int        `json:"count"`
-	Users             int64      `json:"users,omitempty"`
+	Users             int64      `json:"users"`
 	FirstSeen         time.Time  `json:"first_seen"`
 	LastSeen          time.Time  `json:"last_seen"`
 	LatestEvent       string     `json:"latest_event_id"`
@@ -315,6 +315,16 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleControlAPI(w, r, parts)
 		return
 	}
+	if len(parts) == 4 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodGet {
+		if reader, ok := a.Store.(IssueReader); ok {
+			if issue, found := reader.GetIssue(r.URL.Query().Get("project"), parts[3]); found {
+				writeJSON(w, http.StatusOK, issue)
+				return
+			}
+		}
+		http.NotFound(w, r)
+		return
+	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodPut {
 		state, ok := a.Store.(IssueStateStore)
 		if !ok {
@@ -341,7 +351,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		options := queryOptionsFromRequest(r)
 		if paged, ok := a.Store.(PagedStore); ok {
 			page := paged.ListIssuesPage(options)
-			writePageHeaders(w, page.NextCursor)
+			writePageHeaders(w, r, page.NextCursor)
 			writeJSON(w, http.StatusOK, page.Items)
 			return
 		}
@@ -352,7 +362,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		options := queryOptionsFromRequest(r)
 		if paged, ok := a.Store.(PagedStore); ok {
 			page := paged.ListEventsPage(options)
-			writePageHeaders(w, page.NextCursor)
+			writePageHeaders(w, r, page.NextCursor)
 			writeJSON(w, http.StatusOK, page.Items)
 			return
 		}
@@ -369,7 +379,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 6 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && parts[4] == "tags" && r.Method == http.MethodGet {
 		if analytics, ok := a.Store.(AnalyticsStore); ok {
-			writeJSON(w, http.StatusOK, analytics.IssueTagValues(r.URL.Query().Get("project"), parts[3], parts[5], parseTimeQuery(r.URL.Query().Get("start")), parseTimeQuery(r.URL.Query().Get("end")), 20))
+			writeJSON(w, http.StatusOK, analytics.IssueTagValues(r.URL.Query().Get("project"), parts[3], parts[5], parseTimeQuery(r.URL.Query().Get("start")), parseTimeQuery(r.URL.Query().Get("end")), intQuery(r.URL.Query().Get("limit"), 20)))
 			return
 		}
 		http.Error(w, "analytics unavailable", http.StatusNotImplemented)
@@ -571,6 +581,7 @@ func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Sentry-Auth, X-Sentry-Envelope, X-SentryX-Relay-Token, X-SentryX-Management-Token")
+	w.Header().Set("Access-Control-Expose-Headers", "X-Next-Cursor, Link, X-SentryX-Accepted")
 	w.Header().Set("Access-Control-Max-Age", "600")
 }
 

@@ -24,10 +24,11 @@ func TestPostgresAlertCandidatesAndNewIssueState(t *testing.T) {
 	issueID := "alert-issue-" + suffix
 	eventID := "alert-event-" + suffix
 	ruleID := "alert-rule-" + suffix
+	noActionRuleID := ruleID + "-no-action"
 	now := time.Now().UTC()
 	defer func() {
-		_, _ = store.db.Exec(`DELETE FROM sentryx_alert_notification_state WHERE rule_id=$1`, ruleID)
-		_, _ = store.db.Exec(`DELETE FROM sentryx_alert_rules WHERE id=$1`, ruleID)
+		_, _ = store.db.Exec(`DELETE FROM sentryx_alert_notification_state WHERE rule_id IN ($1,$2)`, ruleID, noActionRuleID)
+		_, _ = store.db.Exec(`DELETE FROM sentryx_alert_rules WHERE id IN ($1,$2)`, ruleID, noActionRuleID)
 		_, _ = store.db.Exec(`DELETE FROM sentryx_events WHERE project_id=$1`, projectID)
 		_, _ = store.db.Exec(`DELETE FROM sentryx_issues WHERE project_id=$1`, projectID)
 		_, _ = store.db.Exec(`DELETE FROM sentryx_ingest_jobs WHERE project_id=$1`, projectID)
@@ -57,6 +58,31 @@ func TestPostgresAlertCandidatesAndNewIssueState(t *testing.T) {
 	if !store.alertInCooldown(ctx, AlertRule{ID: ruleID, Condition: "new_issue", CooldownMinutes: 0}, issueID, now) {
 		t.Fatal("new_issue must remain suppressed after its first successful notification")
 	}
+	if err := store.recordAlertAttempt(ctx, ruleID, issueID, now, false); err != nil {
+		t.Fatal(err)
+	}
+	var failures int
+	if err := store.db.QueryRow(`SELECT failures FROM sentryx_alert_notification_state WHERE rule_id=$1 AND issue_id=$2`, ruleID, issueID).Scan(&failures); err != nil || failures != 1 {
+		t.Fatalf("failures=%d err=%v", failures, err)
+	}
+	if err := store.recordAlertAttempt(ctx, ruleID, issueID, now.Add(time.Minute), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT failures FROM sentryx_alert_notification_state WHERE rule_id=$1 AND issue_id=$2`, ruleID, issueID).Scan(&failures); err != nil || failures != 0 {
+		t.Fatalf("reset failures=%d err=%v", failures, err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO sentryx_alert_rules (id,project_id,name,condition,threshold,window_minutes,enabled) VALUES ($1,$2,'misconfigured','count',1,60,true)`, noActionRuleID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EvaluateAlerts(ctx); err == nil {
+		t.Fatal("misconfigured rule should report its failed attempt")
+	}
+	if err := store.db.QueryRow(`SELECT failures FROM sentryx_alert_notification_state WHERE rule_id=$1 AND issue_id=$2`, noActionRuleID, issueID).Scan(&failures); err != nil || failures != 1 {
+		t.Fatalf("no-action failures=%d err=%v", failures, err)
+	}
+	if err := store.EvaluateAlerts(ctx); err != nil {
+		t.Fatalf("immediate retry should be suppressed by backoff: %v", err)
+	}
 	payload := []byte(`{"event_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","message":"rollup check"}`)
 	body := testEnvelope(envelopePart(`{"type":"event","length":`+itoa(len(payload))+`}`, payload))
 	if accepted, err := store.Ingest(projectID, "", body); err != nil || accepted != 1 {
@@ -65,5 +91,14 @@ func TestPostgresAlertCandidatesAndNewIssueState(t *testing.T) {
 	var rollups int
 	if err := store.db.QueryRow(`SELECT count(*) FROM sentryx_issue_stats_hourly WHERE project_id=$1`, projectID).Scan(&rollups); err != nil || rollups != 0 {
 		t.Fatalf("deprecated issue rollups=%d err=%v", rollups, err)
+	}
+}
+
+func TestAlertRetryDelayIsExponentialAndCapped(t *testing.T) {
+	if got := alertRetryDelay(1, 10); got != 30*time.Second {
+		t.Fatalf("first retry=%s", got)
+	}
+	if got := alertRetryDelay(6, 2); got != 2*time.Minute {
+		t.Fatalf("capped retry=%s", got)
 	}
 }

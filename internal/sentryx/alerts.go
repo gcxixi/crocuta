@@ -3,6 +3,7 @@ package sentryx
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -68,10 +69,12 @@ func (p *PostgresStore) EvaluateAlerts(ctx context.Context) error {
 			}
 			encoded, _ := json.Marshal(payload)
 			delivered := false
+			validActions := 0
 			for _, action := range rule.Actions {
 				if !strings.EqualFold(action.Type, "webhook") || !strings.HasPrefix(action.URL, "http") {
 					continue
 				}
+				validActions++
 				req, err := http.NewRequestWithContext(ctx, http.MethodPost, action.URL, bytes.NewReader(encoded))
 				if err == nil {
 					req.Header.Set("Content-Type", "application/json")
@@ -91,11 +94,14 @@ func (p *PostgresStore) EvaluateAlerts(ctx context.Context) error {
 				}
 				delivered = true
 			}
+			if validActions == 0 {
+				DefaultMetrics.Inc("sentryx_alert_delivery_errors_total", map[string]string{"type": "configuration"})
+				failures = append(failures, fmt.Sprintf("rule %s issue %s: no valid delivery action", rule.ID, candidate.ID))
+			}
+			if err := p.recordAlertAttempt(ctx, rule.ID, candidate.ID, now, delivered); err != nil {
+				failures = append(failures, fmt.Sprintf("rule %s attempt state: %v", rule.ID, err))
+			}
 			if delivered {
-				_, err = p.db.ExecContext(ctx, `INSERT INTO sentryx_alert_notification_state (rule_id,issue_id,last_notified_at) VALUES ($1,$2,$3) ON CONFLICT (rule_id,issue_id) DO UPDATE SET last_notified_at=EXCLUDED.last_notified_at`, rule.ID, candidate.ID, now)
-				if err != nil {
-					failures = append(failures, fmt.Sprintf("rule %s cooldown: %v", rule.ID, err))
-				}
 				_, _ = p.db.ExecContext(ctx, `UPDATE sentryx_alert_rules SET last_triggered_at=$1,updated_at=$1 WHERE id=$2`, now, rule.ID)
 			}
 		}
@@ -107,15 +113,48 @@ func (p *PostgresStore) EvaluateAlerts(ctx context.Context) error {
 }
 
 func (p *PostgresStore) alertInCooldown(ctx context.Context, rule AlertRule, issueID string, now time.Time) bool {
-	var last time.Time
-	err := p.db.QueryRowContext(ctx, `SELECT last_notified_at FROM sentryx_alert_notification_state WHERE rule_id=$1 AND issue_id=$2`, rule.ID, issueID).Scan(&last)
+	var lastNotified, lastAttempted sql.NullTime
+	var failures int
+	err := p.db.QueryRowContext(ctx, `SELECT last_notified_at,last_attempted_at,failures FROM sentryx_alert_notification_state WHERE rule_id=$1 AND issue_id=$2`, rule.ID, issueID).Scan(&lastNotified, &lastAttempted, &failures)
 	if err != nil {
 		return false
 	}
-	if strings.EqualFold(rule.Condition, "new_issue") {
+	if strings.EqualFold(rule.Condition, "new_issue") && lastNotified.Valid {
 		return true
 	}
-	return now.Sub(last) < time.Duration(rule.CooldownMinutes)*time.Minute
+	if failures > 0 && lastAttempted.Valid && now.Before(lastAttempted.Time.Add(alertRetryDelay(failures, rule.CooldownMinutes))) {
+		return true
+	}
+	return lastNotified.Valid && now.Sub(lastNotified.Time) < time.Duration(rule.CooldownMinutes)*time.Minute
+}
+
+func alertRetryDelay(failures, cooldownMinutes int) time.Duration {
+	if failures < 1 {
+		return 0
+	}
+	delay := 30 * time.Second
+	for attempt := 1; attempt < failures && delay < time.Hour; attempt++ {
+		delay *= 2
+	}
+	capDelay := time.Hour
+	if cooldownMinutes > 0 && time.Duration(cooldownMinutes)*time.Minute < capDelay {
+		capDelay = time.Duration(cooldownMinutes) * time.Minute
+	}
+	if delay > capDelay {
+		return capDelay
+	}
+	return delay
+}
+
+func (p *PostgresStore) recordAlertAttempt(ctx context.Context, ruleID, issueID string, now time.Time, delivered bool) error {
+	_, err := p.db.ExecContext(ctx, `
+		INSERT INTO sentryx_alert_notification_state (rule_id,issue_id,last_notified_at,last_attempted_at,failures)
+		VALUES ($1,$2,CASE WHEN $4 THEN $3::timestamptz ELSE NULL END,$3::timestamptz,CASE WHEN $4 THEN 0 ELSE 1 END)
+		ON CONFLICT (rule_id,issue_id) DO UPDATE SET
+		  last_notified_at=CASE WHEN $4 THEN $3::timestamptz ELSE sentryx_alert_notification_state.last_notified_at END,
+		  last_attempted_at=$3::timestamptz,
+		  failures=CASE WHEN $4 THEN 0 ELSE sentryx_alert_notification_state.failures+1 END`, ruleID, issueID, now, delivered)
+	return err
 }
 
 func (p *PostgresStore) alertCandidates(ctx context.Context, rule AlertRule, since time.Time) ([]alertCandidate, error) {
@@ -143,7 +182,7 @@ func (p *PostgresStore) alertCandidates(ctx context.Context, rule AlertRule, sin
 		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,1,COALESCE(latest.canonical_json,'{}'::jsonb) FROM sentryx_issues i LEFT JOIN sentryx_events latest ON latest.project_id=i.project_id AND latest.event_id=i.latest_event_id WHERE i.project_id=$1 AND i.regression=true AND i.last_seen >= $2` + extra
 	default:
 		args = append(args, rule.Threshold)
-		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,count(e.event_id),COALESCE(latest.canonical_json,'{}'::jsonb) FROM sentryx_issues i JOIN sentryx_events e ON e.issue_id=i.id AND e.received_at >= $2 LEFT JOIN sentryx_events latest ON latest.project_id=i.project_id AND latest.event_id=i.latest_event_id WHERE i.project_id=$1` + extra + fmt.Sprintf(` GROUP BY i.id,latest.canonical_json HAVING count(e.event_id) >= $%d`, len(args))
+		query = `WITH candidates AS (SELECT i.id,count(e.event_id) AS value FROM sentryx_issues i JOIN sentryx_events e ON e.issue_id=i.id AND e.received_at >= $2 WHERE i.project_id=$1` + extra + fmt.Sprintf(` GROUP BY i.id HAVING count(e.event_id) >= $%d) SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,c.value,COALESCE(latest.canonical_json,'{}'::jsonb) FROM candidates c JOIN sentryx_issues i ON i.id=c.id LEFT JOIN sentryx_events latest ON latest.project_id=i.project_id AND latest.event_id=i.latest_event_id`, len(args))
 	}
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {

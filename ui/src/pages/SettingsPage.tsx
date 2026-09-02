@@ -1,30 +1,43 @@
-import React from "react"
-import { Button, Card, Descriptions, Empty, Form, Input, InputNumber, Space, Table, Tag, Typography } from "antd"
-import { AlertOutlined, KeyOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons"
+import React, { useState } from "react"
+import { Button, Card, Descriptions, Empty, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from "antd"
+import { AlertOutlined, DeleteOutlined, EditOutlined, KeyOutlined, PlusOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useParams } from "react-router-dom"
-import { api, type Project } from "../api"
+import { api, type AlertRule, type Project } from "../api"
 import { ErrorView, Loading, PageHeader, formatTime } from "../components/Common"
 import { SdkQuickStart } from "../components/SdkQuickStart"
 
 export function SettingsPage() {
   const { projectId = "" } = useParams()
   const queryClient = useQueryClient()
+  const [alertForm] = Form.useForm()
+  const [editingRule, setEditingRule] = useState<AlertRule | null>(null)
+  const [alertModalOpen, setAlertModalOpen] = useState(false)
   const query = useQuery({
     queryKey: ["project", "default", projectId],
     queryFn: () => api.project("default", projectId),
   })
+  const alertQuery = useQuery({ queryKey: ["alert-rules", projectId], queryFn: () => api.alertRules("default", projectId) })
+  const saveAlert = useMutation({
+    mutationFn: async (values: Record<string, string | number | boolean>) => {
+      const data: Partial<AlertRule> = {
+        name: String(values.name), condition: values.condition as AlertRule["condition"], threshold: Number(values.threshold || 1), window_minutes: Number(values.window_minutes || 60), cooldown_minutes: Number(values.cooldown_minutes || 30), enabled: Boolean(values.enabled),
+        filters: Object.fromEntries([["level", values.level], ["environment", values.environment], ["release", values.release]].filter((entry) => entry[1]).map(([key, value]) => [key, String(value)])),
+        actions: [{ type: "webhook", url: String(values.url) }],
+      }
+      return editingRule ? api.updateAlertRule("default", projectId, editingRule.id, data) : api.createAlertRule("default", projectId, data)
+    },
+    onSuccess: () => { message.success("告警规则已保存"); setAlertModalOpen(false); setEditingRule(null); alertForm.resetFields(); void queryClient.invalidateQueries({ queryKey: ["alert-rules", projectId] }) },
+    onError: (error: Error) => message.error(error.message),
+  })
+  const deleteAlert = useMutation({ mutationFn: (id: string) => api.deleteAlertRule("default", projectId, id), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["alert-rules", projectId] }) })
+  const toggleAlert = useMutation({ mutationFn: (rule: AlertRule) => api.updateAlertRule("default", projectId, rule.id, { ...rule, enabled: !rule.enabled }), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["alert-rules", projectId] }) })
 
   if (query.isLoading) return <Loading tip="正在加载项目设置..." />
   if (query.isError) return <ErrorView error={query.error as Error} />
 
   const project = query.data as Project
   const defaultDsn = project.keys?.[0]?.dsn
-  const alertQuery = useQuery({ queryKey: ["alert-rules", projectId], queryFn: () => api.alertRules("default", projectId) })
-  const alertMutation = useMutation({
-    mutationFn: (value: { name: string; threshold: number; window_minutes: number; url: string }) => api.createAlertRule("default", projectId, { ...value, condition: "count", enabled: true, cooldown_minutes: 30, actions: [{ type: "webhook", url: value.url }] }),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["alert-rules", projectId] }),
-  })
 
   return (
     <>
@@ -114,20 +127,32 @@ export function SettingsPage() {
           )}
         </Card>
 
-        <Card title={<Space><AlertOutlined style={{ color: "#6366f1" }} /><span>告警规则 (Alerts)</span></Space>} className="content-card">
-          <Form layout="inline" onFinish={(values) => alertMutation.mutate(values as { name: string; threshold: number; window_minutes: number; url: string })}>
-            <Form.Item name="name" rules={[{ required: true }]}><Input size="small" placeholder="规则名称" /></Form.Item>
-            <Form.Item name="threshold" initialValue={10}><InputNumber size="small" min={1} placeholder="阈值" /></Form.Item>
-            <Form.Item name="window_minutes" initialValue={60}><InputNumber size="small" min={1} placeholder="窗口(分钟)" /></Form.Item>
-            <Form.Item name="url" rules={[{ required: true, type: "url" }]}><Input size="small" placeholder="Webhook URL" style={{ width: 220 }} /></Form.Item>
-            <Form.Item><Button size="small" type="primary" htmlType="submit" loading={alertMutation.isPending}>新增</Button></Form.Item>
-          </Form>
-          <Table size="small" rowKey="id" pagination={false} style={{ marginTop: 12 }} dataSource={alertQuery.data ?? []} columns={[{ title: "名称", dataIndex: "name" }, { title: "条件", dataIndex: "condition" }, { title: "阈值", dataIndex: "threshold" }, { title: "状态", dataIndex: "enabled", render: (v: boolean) => <Tag color={v ? "green" : "default"}>{v ? "启用" : "停用"}</Tag> }]} locale={{ emptyText: "暂无告警规则" }} />
+        <Card title={<Space><AlertOutlined style={{ color: "#6366f1" }} /><span>告警规则 (Alerts)</span></Space>} extra={<Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => { setEditingRule(null); alertForm.resetFields(); alertForm.setFieldsValue({ condition: "count", threshold: 10, window_minutes: 60, cooldown_minutes: 30, enabled: true }); setAlertModalOpen(true) }}>新增规则</Button>} className="content-card">
+          <Table size="small" rowKey="id" pagination={false} loading={alertQuery.isLoading} dataSource={alertQuery.data ?? []} columns={[
+            { title: "名称", dataIndex: "name" },
+            { title: "条件", dataIndex: "condition" },
+            { title: "阈值", dataIndex: "threshold", render: (value: number, rule: AlertRule) => rule.condition === "count" ? value : "按 Issue 触发" },
+            { title: "过滤器", dataIndex: "filters", render: (filters: Record<string, string> = {}) => <Space wrap>{Object.entries(filters).map(([key, value]) => <Tag key={key}>{key}:{value}</Tag>)}</Space> },
+            { title: "启用", dataIndex: "enabled", render: (_: boolean, rule: AlertRule) => <Switch size="small" checked={rule.enabled} loading={toggleAlert.isPending} onChange={() => toggleAlert.mutate(rule)} /> },
+            { title: "操作", render: (_: unknown, rule: AlertRule) => <Space><Button size="small" icon={<EditOutlined />} onClick={() => { setEditingRule(rule); alertForm.setFieldsValue({ ...rule, ...rule.filters, url: rule.actions?.[0]?.url }); setAlertModalOpen(true) }}>编辑</Button><Popconfirm title="删除这条告警规则？" onConfirm={() => deleteAlert.mutate(rule.id)}><Button size="small" danger icon={<DeleteOutlined />}>删除</Button></Popconfirm></Space> },
+          ]} locale={{ emptyText: "暂无告警规则" }} />
         </Card>
 
         {/* Embedded SDK QuickStart */}
         <SdkQuickStart dsn={defaultDsn} />
       </Space>
+      <Modal title={editingRule ? "编辑告警规则" : "新增告警规则"} open={alertModalOpen} confirmLoading={saveAlert.isPending} onCancel={() => setAlertModalOpen(false)} onOk={() => alertForm.submit()}>
+        <Form form={alertForm} layout="vertical" onFinish={(values) => saveAlert.mutate(values)} initialValues={{ condition: "count", threshold: 10, window_minutes: 60, cooldown_minutes: 30, enabled: true }}>
+          <Form.Item name="name" label="规则名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="condition" label="触发条件" rules={[{ required: true }]}><Select options={[{ label: "新 Issue", value: "new_issue" }, { label: "回归", value: "regression" }, { label: "窗口事件数", value: "count" }]} /></Form.Item>
+          <Form.Item noStyle shouldUpdate={(previous, current) => previous.condition !== current.condition}>{({ getFieldValue }) => <Form.Item name="threshold" label="阈值" extra={getFieldValue("condition") === "count" ? "窗口内事件数达到阈值时触发" : "该条件按 Issue 逐个触发，阈值固定为 1"}><InputNumber min={1} disabled={getFieldValue("condition") !== "count"} style={{ width: "100%" }} /></Form.Item>}</Form.Item>
+          <Space style={{ display: "flex" }}><Form.Item name="window_minutes" label="窗口（分钟）"><InputNumber min={1} /></Form.Item><Form.Item name="cooldown_minutes" label="冷却（分钟）"><InputNumber min={0} /></Form.Item><Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Space>
+          <Form.Item name="level" label="Level 过滤"><Select allowClear options={["fatal", "error", "warning", "info"].map((value) => ({ label: value, value }))} /></Form.Item>
+          <Form.Item name="environment" label="Environment 过滤"><Input allowClear /></Form.Item>
+          <Form.Item name="release" label="Release 过滤"><Input allowClear /></Form.Item>
+          <Form.Item name="url" label="Webhook URL" rules={[{ required: true, type: "url" }]}><Input /></Form.Item>
+        </Form>
+      </Modal>
     </>
   )
 }

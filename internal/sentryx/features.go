@@ -51,6 +51,30 @@ type IssueStateStore interface {
 	SetIssueStatus(issueID, status, resolvedInRelease string) (Issue, error)
 }
 
+type IssueReader interface {
+	GetIssue(projectID, issueID string) (Issue, bool)
+}
+
+func (s *Store) GetIssue(projectID, issueID string) (Issue, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	issue, ok := s.issues[issueID]
+	if !ok || (projectID != "" && issue.ProjectID != projectID) {
+		return Issue{}, false
+	}
+	result := *issue
+	users := map[string]struct{}{}
+	for _, event := range s.events {
+		if event.IssueID == issueID {
+			if identity := eventUserIdentity(event); identity != "" {
+				users[identity] = struct{}{}
+			}
+		}
+	}
+	result.Users = int64(len(users))
+	return result, true
+}
+
 type SeriesPoint struct {
 	Bucket time.Time `json:"bucket"`
 	Count  int64     `json:"count"`
@@ -173,6 +197,44 @@ func queryMatchesIssue(issue Issue, options QueryOptions) bool {
 	return true
 }
 
+func issueTagFilters(query string) map[string]string {
+	filters := map[string]string{}
+	for _, token := range strings.Fields(query) {
+		parts := strings.SplitN(token, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			continue
+		}
+		switch strings.ToLower(parts[0]) {
+		case "is", "level", "title":
+			continue
+		default:
+			filters[parts[0]] = parts[1]
+		}
+	}
+	return filters
+}
+
+func eventMatchesIssueFilters(event Event, options QueryOptions, tags map[string]string) bool {
+	if options.Environment != "" && event.Environment != options.Environment {
+		return false
+	}
+	if options.Release != "" && event.Release != options.Release {
+		return false
+	}
+	for key, value := range tags {
+		actual := event.Tags[key]
+		if key == "environment" {
+			actual = event.Environment
+		} else if key == "release" {
+			actual = event.Release
+		}
+		if actual != value {
+			return false
+		}
+	}
+	return true
+}
+
 func issueSortKey(issue Issue, sortName string) string {
 	switch sortName {
 	case "first_seen":
@@ -215,25 +277,28 @@ func eventMatches(event Event, options QueryOptions) bool {
 func (s *Store) ListIssuesPage(options QueryOptions) IssuePage {
 	options = defaultQueryOptions(options)
 	items := s.ListIssues(options.ProjectID)
-	if options.Sort == "users" {
-		usersByIssue := make(map[string]map[string]struct{})
-		for _, event := range s.ListEvents(options.ProjectID, "") {
-			identity := eventUserIdentity(event)
-			if identity == "" {
-				continue
-			}
+	events := s.ListEvents(options.ProjectID, "")
+	usersByIssue := make(map[string]map[string]struct{})
+	matchingIssues := make(map[string]bool)
+	tagFilters := issueTagFilters(options.Query)
+	needsEventFilter := options.Environment != "" || options.Release != "" || len(tagFilters) > 0
+	for _, event := range events {
+		if identity := eventUserIdentity(event); identity != "" {
 			if usersByIssue[event.IssueID] == nil {
 				usersByIssue[event.IssueID] = make(map[string]struct{})
 			}
 			usersByIssue[event.IssueID][identity] = struct{}{}
 		}
-		for index := range items {
-			items[index].Users = int64(len(usersByIssue[items[index].ID]))
+		if eventMatchesIssueFilters(event, options, tagFilters) {
+			matchingIssues[event.IssueID] = true
 		}
+	}
+	for index := range items {
+		items[index].Users = int64(len(usersByIssue[items[index].ID]))
 	}
 	filtered := items[:0]
 	for _, issue := range items {
-		if queryMatchesIssue(issue, options) {
+		if queryMatchesIssue(issue, options) && (!needsEventFilter || matchingIssues[issue.ID]) {
 			filtered = append(filtered, issue)
 		}
 	}
@@ -649,10 +714,14 @@ func groupingVersionNumber() int {
 	return parsed
 }
 
-func writePageHeaders(w http.ResponseWriter, next string) {
+func writePageHeaders(w http.ResponseWriter, r *http.Request, next string) {
 	if next != "" {
 		w.Header().Set("X-Next-Cursor", next)
-		w.Header().Set("Link", `; rel="next"; cursor="`+next+`"`)
+		nextURL := *r.URL
+		query := nextURL.Query()
+		query.Set("cursor", next)
+		nextURL.RawQuery = query.Encode()
+		w.Header().Set("Link", fmt.Sprintf(`<%s>; rel="next"; results="true"; cursor="%s"`, nextURL.RequestURI(), next))
 	}
 }
 

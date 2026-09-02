@@ -61,8 +61,8 @@ user identity) are promoted to canonical tags during decoding.
 
 ## Retention, security, and reconciliation
 
-Migrations `006_feature_request.sql`, `007_grouping_migration.sql`, and
-`008_issue_2_correctness.sql` add issue lifecycle columns, hourly
+Migrations `006_feature_request.sql` through
+`009_issue_10_postgres_and_alerts.sql` add issue lifecycle columns, hourly
 rollups, alert rules, nullable completed-job payloads, and project retention
 configuration, persisted grouping-hash mappings/component trees, per-issue
 alert cooldown state, and operational indexes. The worker performs bounded
@@ -94,3 +94,26 @@ vet/tests (including installing root Node SDK dependencies), and Ant Design UI
 builds. `/health/live`, `/health/ready`, and the
 Prometheus text endpoint `/metrics` are available on both server and Relay.
 CI pins `govulncheck` to a reviewed version instead of resolving `latest`.
+The Go CI job also starts PostgreSQL 17, applies every migration in filename
+order, and runs grouping migration, keyset pagination, bounded retention/blob
+cleanup, alert query, and retry-state integration tests against the real store.
+
+## Issue 10 UI and query contract
+
+Issue list responses expose `X-Next-Cursor` to cross-origin clients and include
+an RFC 8288-compatible `Link` URI. List queries support canonical `tag:value`
+tokens plus `environment` and `release`. A precise `sentryx_issue_users` set and
+transactionally refreshed `issues.users` counter make affected-user counts
+available on every list response and cheap to sort; retention removes identities
+that no longer have a retained event.
+
+Alert attempts persist `last_attempted_at` and consecutive `failures`. Failed or
+misconfigured actions use exponential retry delay starting at 30 seconds and
+capped by the rule cooldown (or one hour); a successful delivery clears the
+failure counter. Count-rule candidates aggregate issue IDs first and join the
+latest event afterward, avoiding JSONB payloads in the grouping key.
+
+The Ant Design console now consumes cursor pages and server-side filters, shows
+24-hour/7-day/30-day event and user trends with Recharts, supports top-K tag
+drill-down, provides full alert-rule CRUD and enable/disable controls, and adds
+a project overview backed by the shared-window project statistics endpoint.

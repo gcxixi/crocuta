@@ -2,6 +2,7 @@ package sentryx
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 )
@@ -241,59 +242,93 @@ func (p *PostgresStore) CleanupExpired(ctx context.Context, fallback time.Durati
 	}
 	var deleted int64
 	for _, target := range targets {
-		for {
-			var count int64
-			var blobKeys []string
-			if target.withBlob {
-				rows, err := connection.QueryContext(ctx, target.query, days, batchSize)
-				if err != nil {
+		var count int64
+		var blobKeys []string
+		if target.withBlob {
+			rows, err := connection.QueryContext(ctx, target.query, days, batchSize)
+			if err != nil {
+				return deleted, err
+			}
+			for rows.Next() {
+				var key string
+				if err := rows.Scan(&key); err != nil {
+					rows.Close()
 					return deleted, err
 				}
-				for rows.Next() {
-					var key string
-					if err := rows.Scan(&key); err != nil {
-						rows.Close()
-						return deleted, err
-					}
-					count++
-					if key != "" {
-						blobKeys = append(blobKeys, key)
-					}
-				}
-				err = rows.Err()
-				rows.Close()
-				if err != nil {
-					return deleted, err
-				}
-			} else {
-				result, err := connection.ExecContext(ctx, target.query, days, batchSize)
-				if err != nil {
-					return deleted, err
-				}
-				count, _ = result.RowsAffected()
-			}
-			deleted += count
-			if count > 0 {
-				DefaultMetrics.Add("sentryx_retention_deleted_total", map[string]string{"kind": target.kind}, uint64(count))
-			}
-			if deleter, ok := p.blobDeleter(); ok {
-				for _, key := range blobKeys {
-					if err := deleter.Delete(ctx, key); err != nil {
-						DefaultMetrics.Inc("sentryx_blob_gc_errors_total", map[string]string{"kind": target.kind})
-					}
+				count++
+				if key != "" {
+					blobKeys = append(blobKeys, key)
 				}
 			}
-			if count < batchSize {
-				break
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return deleted, err
 			}
-			select {
-			case <-ctx.Done():
-				return deleted, ctx.Err()
-			case <-time.After(10 * time.Millisecond):
+		} else {
+			result, err := connection.ExecContext(ctx, target.query, days, batchSize)
+			if err != nil {
+				return deleted, err
+			}
+			count, _ = result.RowsAffected()
+		}
+		deleted += count
+		if count > 0 {
+			DefaultMetrics.Add("sentryx_retention_deleted_total", map[string]string{"kind": target.kind}, uint64(count))
+		}
+		if deleter, ok := p.blobDeleter(); ok {
+			for _, key := range blobKeys {
+				if err := deleter.Delete(ctx, key); err != nil {
+					DefaultMetrics.Inc("sentryx_blob_gc_errors_total", map[string]string{"kind": target.kind})
+				}
 			}
 		}
 	}
+	userRows, err := p.cleanupIssueUsers(ctx, connection, batchSize)
+	if err != nil {
+		return deleted, err
+	}
+	deleted += userRows
+	if userRows > 0 {
+		DefaultMetrics.Add("sentryx_retention_deleted_total", map[string]string{"kind": "issue_users"}, uint64(userRows))
+	}
 	return deleted, nil
+}
+
+func (p *PostgresStore) cleanupIssueUsers(ctx context.Context, connection *sql.Conn, batchSize int) (int64, error) {
+	rows, err := connection.QueryContext(ctx, `DELETE FROM sentryx_issue_users u WHERE u.ctid IN (
+		SELECT candidate.ctid FROM sentryx_issue_users candidate
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM sentryx_events e WHERE e.issue_id=candidate.issue_id AND
+		  CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id')
+		       WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END = candidate.user_key
+		) LIMIT $1
+	) RETURNING issue_id`, batchSize)
+	if err != nil {
+		return 0, err
+	}
+	issueSet := map[string]struct{}{}
+	var deleted int64
+	for rows.Next() {
+		var issueID string
+		if err := rows.Scan(&issueID); err != nil {
+			rows.Close()
+			return deleted, err
+		}
+		issueSet[issueID] = struct{}{}
+		deleted++
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || len(issueSet) == 0 {
+		return deleted, err
+	}
+	issueIDs := make([]string, 0, len(issueSet))
+	for issueID := range issueSet {
+		issueIDs = append(issueIDs, issueID)
+	}
+	_, err = connection.ExecContext(ctx, `UPDATE sentryx_issues i SET users=(SELECT count(*) FROM sentryx_issue_users u WHERE u.issue_id=i.id) WHERE i.id=ANY($1)`, issueIDs)
+	return deleted, err
 }
 
 func (p *PostgresStore) blobDeleter() (BlobDeleter, bool) {
