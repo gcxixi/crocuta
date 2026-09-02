@@ -54,6 +54,31 @@ func TestItemPolicyPreservesEnvelopeAndItemHeaders(t *testing.T) {
 	}
 }
 
+func TestItemPolicyLabelsUnknownDrops(t *testing.T) {
+	previousMetrics := DefaultMetrics
+	DefaultMetrics = NewMetrics()
+	defer func() { DefaultMetrics = previousMetrics }()
+	payload := []byte(`{"future":true}`)
+	body := testEnvelope(envelopePart(`{"type":"future_signal","length":`+itoa(len(payload))+`}`, payload))
+	_, dropped, err := ApplyItemPolicy(body, ParseItemPolicy("transaction:drop"))
+	if err != nil || dropped != 1 {
+		t.Fatalf("dropped=%d err=%v", dropped, err)
+	}
+	key := `sentryx_envelope_items_total{action="drop_unknown",type="future_signal"}`
+	if DefaultMetrics.Snapshot()[key] != 1 {
+		t.Fatalf("missing metric %s: %#v", key, DefaultMetrics.Snapshot())
+	}
+}
+
+func TestNormalizeAlertRuleUsesBooleanThreshold(t *testing.T) {
+	for _, condition := range []string{"new_issue", "regression"} {
+		rule := normalizeAlertRule(AlertRule{Condition: condition, Threshold: 99})
+		if rule.Threshold != 1 {
+			t.Fatalf("condition=%s threshold=%d", condition, rule.Threshold)
+		}
+	}
+}
+
 func TestIssueLifecyclePaginationAndAnalytics(t *testing.T) {
 	store := NewStore()
 	for index, message := range []string{"first 100", "second 200"} {

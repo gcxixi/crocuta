@@ -665,7 +665,10 @@ func normalizeAlertRule(rule AlertRule) AlertRule {
 	if rule.ID == "" {
 		rule.ID = alertRuleID(rule.ProjectID)
 	}
-	if rule.Threshold <= 0 {
+	rule.Condition = strings.ToLower(strings.TrimSpace(rule.Condition))
+	if rule.Condition == "new_issue" || rule.Condition == "regression" {
+		rule.Threshold = 1
+	} else if rule.Threshold <= 0 {
 		rule.Threshold = 1
 	}
 	if rule.WindowMinutes <= 0 {

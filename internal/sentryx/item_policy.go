@@ -33,7 +33,7 @@ func ItemPolicyFromEnv() ItemPolicy { return ParseItemPolicy(os.Getenv("SENTRYX_
 func (p ItemPolicy) action(item envelopeItem) string {
 	action := strings.ToLower(strings.TrimSpace(p[item.Type]))
 	if action == "" {
-		if item.Type == "event" || item.Type == "error" || item.Type == "client_report" || item.Type == "attachment" || isExtendedSignalType(item.Type) {
+		if isKnownEnvelopeItemType(item.Type) {
 			return "store"
 		}
 		return "drop"
@@ -57,9 +57,14 @@ func (p ItemPolicy) action(item envelopeItem) string {
 	return action
 }
 
+func isKnownEnvelopeItemType(itemType string) bool {
+	return itemType == "event" || itemType == "error" || itemType == "client_report" || itemType == "attachment" || isExtendedSignalType(itemType)
+}
+
 // ApplyItemPolicy filters an envelope and returns the number of dropped items.
 // Rebuilding headers with the standard Sentry fields keeps the resulting
-// envelope valid while allowing future item types to pass through by default.
+// envelope valid. Unknown item types are deliberately dropped when a policy is
+// active and are exposed separately in metrics instead of being silently lost.
 func ApplyItemPolicy(body []byte, policy ItemPolicy) ([]byte, int, error) {
 	if len(policy) == 0 {
 		return body, 0, nil
@@ -79,7 +84,11 @@ func ApplyItemPolicy(body []byte, policy ItemPolicy) ([]byte, int, error) {
 	for _, item := range items {
 		if policy.action(item) == "drop" {
 			dropped++
-			DefaultMetrics.Inc("sentryx_envelope_items_total", map[string]string{"type": item.Type, "action": "drop"})
+			action := "drop"
+			if _, configured := policy[item.Type]; !configured && !isKnownEnvelopeItemType(item.Type) {
+				action = "drop_unknown"
+			}
+			DefaultMetrics.Inc("sentryx_envelope_items_total", map[string]string{"type": item.Type, "action": action})
 			continue
 		}
 		DefaultMetrics.Inc("sentryx_envelope_items_total", map[string]string{"type": item.Type, "action": "store"})

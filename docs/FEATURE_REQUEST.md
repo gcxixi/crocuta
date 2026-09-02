@@ -9,7 +9,8 @@ are backwards-compatible query and lifecycle capabilities.
 `SENTRYX_ITEM_POLICY` is a comma-separated map such as
 `transaction:drop,session:drop,replay_event:store,profile:sample:25`.
 Supported actions are `store`, `drop`, and `sample:N` (percentage). Unknown
-types default to `store`, so future Sentry SDK items are not silently lost.
+types are dropped while a policy is active and counted with
+`action="drop_unknown"`, so unsupported SDK additions are visible to operators.
 Relay exposes `/health/ready` and `/metrics`. When
 `SENTRYX_MIRROR_SPOOL_DIR` is set, failed mirror deliveries are written as
 atomic JSON files and retried every 15 seconds.
@@ -39,7 +40,10 @@ automatically becomes a regression when a later event arrives.
 * `PUT|DELETE /api/0/projects/<org>/<project>/alert-rules/<id>`
 
 Alert rules support `new_issue`, `regression`, and event-count conditions,
-with a webhook action, threshold, window, cooldown, and enabled flag. The
+with a webhook action, threshold, window, cooldown, and enabled flag.
+`new_issue` and `regression` are boolean per-issue conditions, so their
+threshold is normalized to `1`; `new_issue` fires at most once for each
+`(rule, issue)`, while regression and count rules honor cooldown. The
 worker evaluates rules every 30 seconds outside the ingest loop. Evaluation is
 serialized with a PostgreSQL advisory lock, filters `level`, `environment`, and
 `release` are enforced, and cooldown state is isolated per `(rule, issue)`.
@@ -63,15 +67,20 @@ rollups, alert rules, nullable completed-job payloads, and project retention
 configuration, persisted grouping-hash mappings/component trees, per-issue
 alert cooldown state, and operational indexes. The worker performs bounded
 5,000-row cleanup batches in a dedicated goroutine, clears queue
-payloads on acknowledgement. `SENTRYX_API_TOKEN_HASHES` accepts
+payloads on acknowledgement, and samples queue depth every 10 seconds rather
+than once per worker poll. The legacy `sentryx_issue_stats_hourly` table is no
+longer written because issue series and distinct users are calculated directly
+from `sentryx_events`; it remains in the schema for upgrade compatibility.
+`SENTRYX_API_TOKEN_HASHES` accepts
 `sha256hex:user-id` entries; plaintext `SENTRYX_API_TOKENS` remains supported
 for local compatibility. Blob-backed expired attachments and signals are
 reclaimed after the database transaction. `cmd/sentryx-reconcile` paginates
 both stores, supports `--start`, `--end`, and `--page-size`, calls the official
 Sentry `/api/0/projects/{org}/{project}/events/` endpoint, and reports missing
 events plus grouping mismatches. `sentryx-groupctl`
-replays JSONL or PostgreSQL events and reports grouping changes between two
-algorithm versions.
+streams JSONL or PostgreSQL events and reports grouping changes between two
+algorithm versions. It supports `--since`, `--limit`, `--top`, and `--samples`,
+and reports likely merges and splits with representative event IDs and titles.
 
 Grouping v2 is now the default. During rolling upgrades it computes both v2
 and legacy v1 hashes; when v1 already resolves to an issue, the v2 mapping is
@@ -84,3 +93,4 @@ The repository now includes `.github/workflows/ci.yml` for Go formatting,
 vet/tests (including installing root Node SDK dependencies), and Ant Design UI
 builds. `/health/live`, `/health/ready`, and the
 Prometheus text endpoint `/metrics` are available on both server and Relay.
+CI pins `govulncheck` to a reviewed version instead of resolving `latest`.

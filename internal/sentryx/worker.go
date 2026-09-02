@@ -112,11 +112,9 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 	}
 	go p.runRetentionLoop(ctx)
 	go p.runAlertLoop(ctx)
+	go p.runQueueMetricsLoop(ctx)
 	for {
 		jobs, err := p.LeaseJobs(ctx, batch, 30*time.Second)
-		for state, count := range p.QueueDepth(ctx) {
-			DefaultMetrics.Set("sentryx_queue_depth", map[string]string{"state": state}, uint64(count))
-		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -152,6 +150,21 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(poll):
+		}
+	}
+}
+
+func (p *PostgresStore) runQueueMetricsLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for state, count := range p.QueueDepth(ctx) {
+				DefaultMetrics.Set("sentryx_queue_depth", map[string]string{"state": state}, uint64(count))
+			}
 		}
 	}
 }

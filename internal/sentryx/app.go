@@ -652,7 +652,7 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 			event = scrubEventWithConfig(event, s.PII)
 			s.symbolicate(&event)
 			if event.SymbolicationStatus != "" {
-				DefaultMetrics.Inc("sentryx_symbolication_total", map[string]string{"project": event.ProjectID, "release": event.Release, "status": event.SymbolicationStatus})
+				DefaultMetrics.Inc("sentryx_symbolication_total", map[string]string{"project": event.ProjectID, "status": event.SymbolicationStatus})
 			}
 			groupHash := groupingHash(event)
 			s.mu.Lock()

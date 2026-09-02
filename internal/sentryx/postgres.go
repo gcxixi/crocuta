@@ -165,7 +165,7 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			} else {
 				event.SymbolicationStatus = "miss"
 			}
-			DefaultMetrics.Inc("sentryx_symbolication_total", map[string]string{"project": event.ProjectID, "release": event.Release, "status": event.SymbolicationStatus})
+			DefaultMetrics.Inc("sentryx_symbolication_total", map[string]string{"project": event.ProjectID, "status": event.SymbolicationStatus})
 		}
 		groupHash := groupingHash(event)
 		groupVersion := groupingVersionNumber()
@@ -227,10 +227,6 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 		}
 		_, _ = tx.Exec(`INSERT INTO sentryx_grouping_hashes (project_id, grouping_version, group_hash, issue_id, components) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, projectID, groupVersion, groupHash, returnedIssueID, mustJSON(GroupingComponents(event, groupingVersion())))
 		bucket := event.ReceivedAt.UTC().Truncate(time.Hour)
-		if _, err := tx.Exec(`INSERT INTO sentryx_issue_stats_hourly (project_id, issue_id, bucket, event_count, user_count) VALUES ($1,$2,$3,1,$4) ON CONFLICT (project_id,issue_id,bucket) DO UPDATE SET event_count=sentryx_issue_stats_hourly.event_count+1, user_count=sentryx_issue_stats_hourly.user_count+EXCLUDED.user_count`, projectID, returnedIssueID, bucket, userCount(event)); err != nil {
-			tx.Rollback()
-			return accepted, err
-		}
 		for key, value := range event.Tags {
 			if value == "" {
 				continue
@@ -493,13 +489,6 @@ func (p *PostgresStore) SetIssueStatus(issueID, status, resolvedInRelease string
 	var issue Issue
 	err := p.db.QueryRow(`UPDATE sentryx_issues SET status=$1,status_changed_at=now(),resolved_in_release=NULLIF($2,''),regression=false,ignore_count=ignore_count+CASE WHEN $1='ignored' THEN 1 ELSE 0 END WHERE id=$3 RETURNING id,project_id,title,level,count,first_seen,last_seen,latest_event_id,group_hash,status,status_changed_at,COALESCE(resolved_in_release,''),ignore_until,regression,ignore_count,ignore_window`, status, resolvedInRelease, issueID).Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow)
 	return issue, err
-}
-
-func userCount(event Event) int {
-	if event.User != nil && (event.User.ID != "" || event.User.Email != "") {
-		return 1
-	}
-	return 0
 }
 
 func (p *PostgresStore) IssueSeries(projectID, issueID string, start, end time.Time, resolution time.Duration) []SeriesPoint {

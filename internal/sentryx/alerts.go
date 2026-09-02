@@ -58,9 +58,6 @@ func (p *PostgresStore) EvaluateAlerts(ctx context.Context) error {
 			failures = append(failures, fmt.Sprintf("rule %s query: %v", rule.ID, err))
 			continue
 		}
-		if (rule.Condition == "new_issue" || rule.Condition == "regression") && int64(len(candidates)) < rule.Threshold {
-			continue
-		}
 		for _, candidate := range candidates {
 			if p.alertInCooldown(ctx, rule, candidate.ID, now) {
 				continue
@@ -112,7 +109,13 @@ func (p *PostgresStore) EvaluateAlerts(ctx context.Context) error {
 func (p *PostgresStore) alertInCooldown(ctx context.Context, rule AlertRule, issueID string, now time.Time) bool {
 	var last time.Time
 	err := p.db.QueryRowContext(ctx, `SELECT last_notified_at FROM sentryx_alert_notification_state WHERE rule_id=$1 AND issue_id=$2`, rule.ID, issueID).Scan(&last)
-	return err == nil && now.Sub(last) < time.Duration(rule.CooldownMinutes)*time.Minute
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(rule.Condition, "new_issue") {
+		return true
+	}
+	return now.Sub(last) < time.Duration(rule.CooldownMinutes)*time.Minute
 }
 
 func (p *PostgresStore) alertCandidates(ctx context.Context, rule AlertRule, since time.Time) ([]alertCandidate, error) {
@@ -135,12 +138,12 @@ func (p *PostgresStore) alertCandidates(ctx context.Context, rule AlertRule, sin
 	var query string
 	switch strings.ToLower(rule.Condition) {
 	case "new_issue":
-		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,1 FROM sentryx_issues i WHERE i.project_id=$1 AND i.first_seen >= $2` + extra
+		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,1,COALESCE(latest.canonical_json,'{}'::jsonb) FROM sentryx_issues i LEFT JOIN sentryx_events latest ON latest.project_id=i.project_id AND latest.event_id=i.latest_event_id WHERE i.project_id=$1 AND i.first_seen >= $2` + extra
 	case "regression":
-		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,1 FROM sentryx_issues i WHERE i.project_id=$1 AND i.regression=true AND i.last_seen >= $2` + extra
+		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,1,COALESCE(latest.canonical_json,'{}'::jsonb) FROM sentryx_issues i LEFT JOIN sentryx_events latest ON latest.project_id=i.project_id AND latest.event_id=i.latest_event_id WHERE i.project_id=$1 AND i.regression=true AND i.last_seen >= $2` + extra
 	default:
 		args = append(args, rule.Threshold)
-		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,count(e.event_id) FROM sentryx_issues i JOIN sentryx_events e ON e.issue_id=i.id AND e.received_at >= $2 WHERE i.project_id=$1` + extra + fmt.Sprintf(` GROUP BY i.id HAVING count(e.event_id) >= $%d`, len(args))
+		query = `SELECT i.id,i.title,i.level,i.count,i.first_seen,i.latest_event_id,count(e.event_id),COALESCE(latest.canonical_json,'{}'::jsonb) FROM sentryx_issues i JOIN sentryx_events e ON e.issue_id=i.id AND e.received_at >= $2 LEFT JOIN sentryx_events latest ON latest.project_id=i.project_id AND latest.event_id=i.latest_event_id WHERE i.project_id=$1` + extra + fmt.Sprintf(` GROUP BY i.id,latest.canonical_json HAVING count(e.event_id) >= $%d`, len(args))
 	}
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -150,32 +153,25 @@ func (p *PostgresStore) alertCandidates(ctx context.Context, rule AlertRule, sin
 	result := []alertCandidate{}
 	for rows.Next() {
 		var candidate alertCandidate
-		if err := rows.Scan(&candidate.ID, &candidate.Title, &candidate.Level, &candidate.Count, &candidate.FirstSeen, &candidate.LatestEvent, &candidate.Value); err != nil {
+		var raw []byte
+		if err := rows.Scan(&candidate.ID, &candidate.Title, &candidate.Level, &candidate.Count, &candidate.FirstSeen, &candidate.LatestEvent, &candidate.Value, &raw); err != nil {
 			return nil, err
+		}
+		var event Event
+		if json.Unmarshal(raw, &event) == nil {
+			frames := event.SymbolicatedFrames
+			if len(frames) == 0 {
+				frames = event.Frames
+			}
+			if len(frames) > 0 {
+				frame := frames[len(frames)-1]
+				candidate.StackTop = &frame
+			}
 		}
 		result = append(result, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-	rows.Close()
-	for index := range result {
-		var raw []byte
-		if err := p.db.QueryRowContext(ctx, `SELECT canonical_json FROM sentryx_events WHERE project_id=$1 AND event_id=$2`, rule.ProjectID, result[index].LatestEvent).Scan(&raw); err != nil {
-			continue
-		}
-		var event Event
-		if json.Unmarshal(raw, &event) != nil {
-			continue
-		}
-		frames := event.SymbolicatedFrames
-		if len(frames) == 0 {
-			frames = event.Frames
-		}
-		if len(frames) > 0 {
-			frame := frames[len(frames)-1]
-			result[index].StackTop = &frame
-		}
 	}
 	return result, nil
 }
