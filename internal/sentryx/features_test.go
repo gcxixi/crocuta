@@ -84,3 +84,37 @@ func TestMemoryAlertRules(t *testing.T) {
 		t.Fatal("rule was not deleted")
 	}
 }
+
+func TestProjectKeyRotationAndGroupingVersions(t *testing.T) {
+	control := NewMemoryControlPlane()
+	project, err := control.CreateProject("default", "Web", "web", "javascript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, ok := control.(ProjectKeyStore)
+	if !ok {
+		t.Fatal("memory control does not implement project key store")
+	}
+	created, err := keys.CreateProjectKey("default", project.Slug, "rotation")
+	if err != nil || created.Public == "" || created.Secret == "" {
+		t.Fatalf("created=%#v err=%v", created, err)
+	}
+	if len(keys.ListProjectKeys("default", project.Slug)) != 2 {
+		t.Fatal("expected two active keys")
+	}
+	if err := keys.RevokeProjectKey("default", project.Slug, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys.ListProjectKeys("default", project.Slug)) != 1 {
+		t.Fatal("expected original key to remain")
+	}
+	event := Event{Platform: "javascript", Message: "request 123 failed", Culprit: "assets/main.a1b2c3d4.js"}
+	v1 := GroupingHashForVersion(event, "v1")
+	v2 := GroupingHashForVersion(event, "v2")
+	if v1 == v2 {
+		t.Fatal("versioned grouping hashes must differ")
+	}
+	if got := normalizePath("https://cdn.test/assets/main.a1b2c3d4.js"); got != "/assets/main" {
+		t.Fatalf("normalized path=%q", got)
+	}
+}

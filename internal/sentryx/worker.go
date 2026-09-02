@@ -13,6 +13,23 @@ type IngestJob struct {
 	Attempts  int
 }
 
+func (p *PostgresStore) QueueDepth(ctx context.Context) map[string]int64 {
+	result := map[string]int64{"ready": 0, "processing": 0, "dead": 0}
+	rows, err := p.db.QueryContext(ctx, `SELECT state, count(*) FROM sentryx_ingest_jobs GROUP BY state`)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var state string
+		var count int64
+		if rows.Scan(&state, &count) == nil {
+			result[state] = count
+		}
+	}
+	return result
+}
+
 // LeaseJobs claims ready jobs and jobs whose previous lease expired. The
 // UPDATE...RETURNING statement and SKIP LOCKED allow multiple workers to run
 // without a central coordinator.
@@ -112,6 +129,9 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 		default:
 		}
 		jobs, err := p.LeaseJobs(ctx, batch, 30*time.Second)
+		for state, count := range p.QueueDepth(ctx) {
+			DefaultMetrics.Set("sentryx_queue_depth", map[string]string{"state": state}, uint64(count))
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

@@ -272,6 +272,51 @@ func (p *PostgresStore) projectKeys(projectID string) []ProjectKey {
 	return result
 }
 
+func (p *PostgresStore) ListProjectKeys(orgRef, projectRef string) []ProjectKey {
+	project, ok := p.GetProject(orgRef, projectRef)
+	if !ok {
+		return nil
+	}
+	return p.projectKeys(project.ID)
+}
+
+func (p *PostgresStore) CreateProjectKey(orgRef, projectRef, name string) (ProjectKey, error) {
+	project, ok := p.GetProject(orgRef, projectRef)
+	if !ok {
+		return ProjectKey{}, errors.New("project not found")
+	}
+	if strings.TrimSpace(name) == "" {
+		name = "Key"
+	}
+	key := ProjectKey{ID: randomID(), ProjectID: project.ID, Name: name, Public: "public-" + randomID()[:16], Secret: randomID()}
+	key.DSN = "http://" + url.QueryEscape(key.Public) + "@localhost/" + url.PathEscape(project.ID)
+	_, err := p.db.Exec(`INSERT INTO sentryx_project_keys (id,project_id,name,public_key,secret_key) VALUES ($1,$2,$3,$4,$5)`, key.ID, key.ProjectID, key.Name, key.Public, key.Secret)
+	return key, err
+}
+
+func (p *PostgresStore) RevokeProjectKey(orgRef, projectRef, keyID string) error {
+	project, ok := p.GetProject(orgRef, projectRef)
+	if !ok {
+		return errors.New("project not found")
+	}
+	var count int
+	if err := p.db.QueryRow(`SELECT count(*) FROM sentryx_project_keys WHERE project_id=$1`, project.ID).Scan(&count); err != nil {
+		return err
+	}
+	if count <= 1 {
+		return errors.New("cannot revoke the last project key")
+	}
+	result, err := p.db.Exec(`DELETE FROM sentryx_project_keys WHERE project_id=$1 AND id=$2`, project.ID, keyID)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return errors.New("project key not found")
+	}
+	return nil
+}
+
 func (p *PostgresStore) ValidProjectKey(projectID, publicKey string) bool {
 	var count int
 	if err := p.db.QueryRow(`SELECT COUNT(*) FROM sentryx_project_keys WHERE project_id=$1`, projectID).Scan(&count); err != nil || count == 0 {

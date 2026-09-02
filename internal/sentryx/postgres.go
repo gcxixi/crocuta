@@ -167,14 +167,28 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			}
 		}
 		groupHash := groupingHash(event)
+		groupVersion := groupingVersionNumber()
 		issueID := shortHash(projectID + ":" + groupHash)
+		mappedIssueID := p.lookupGroupingIssue(projectID, groupVersion, groupHash, event)
+		if mappedIssueID != "" {
+			issueID = mappedIssueID
+		}
 		event.IssueID = issueID
 		tx, err := p.db.BeginTx(context.Background(), nil)
 		if err != nil {
 			return accepted, err
 		}
 		var returnedIssueID string
-		err = tx.QueryRow(`
+		if mappedIssueID != "" {
+			err = tx.QueryRow(`
+				UPDATE sentryx_issues
+				SET count=count+1, last_seen=$2, latest_event_id=$3,
+				  status=CASE WHEN status='resolved' THEN 'unresolved' ELSE status END,
+				  regression=CASE WHEN status='resolved' THEN true ELSE regression END,
+				  status_changed_at=CASE WHEN status='resolved' THEN $2 ELSE status_changed_at END
+				WHERE id=$1 RETURNING id`, issueID, now, event.EventID).Scan(&returnedIssueID)
+		} else {
+			err = tx.QueryRow(`
 			INSERT INTO sentryx_issues
 			  (id, project_id, title, level, count, first_seen, last_seen, latest_event_id, grouping_version, group_hash, status, status_changed_at)
 			VALUES ($1, $2, $3, $4, 1, $5, $5, $6, $8, $7, 'unresolved', $5)
@@ -184,7 +198,8 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			  status = CASE WHEN sentryx_issues.status = 'resolved' THEN 'unresolved' ELSE sentryx_issues.status END,
 			  regression = CASE WHEN sentryx_issues.status = 'resolved' THEN true ELSE sentryx_issues.regression END,
 			  status_changed_at = CASE WHEN sentryx_issues.status = 'resolved' THEN EXCLUDED.status_changed_at ELSE sentryx_issues.status_changed_at END
-			RETURNING id`, issueID, projectID, event.Title, event.Level, now, event.EventID, groupHash, groupingVersionNumber()).Scan(&returnedIssueID)
+			RETURNING id`, issueID, projectID, event.Title, event.Level, now, event.EventID, groupHash, groupVersion).Scan(&returnedIssueID)
+		}
 		if err != nil {
 			tx.Rollback()
 			return accepted, err
@@ -207,6 +222,7 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			}
 			continue
 		}
+		_, _ = tx.Exec(`INSERT INTO sentryx_grouping_hashes (project_id, grouping_version, group_hash, issue_id, components) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, projectID, groupVersion, groupHash, returnedIssueID, mustJSON(GroupingComponents(event, groupingVersion())))
 		if err := tx.Commit(); err != nil {
 			return accepted, err
 		}
@@ -215,6 +231,20 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 		accepted++
 	}
 	return accepted, nil
+}
+
+func (p *PostgresStore) lookupGroupingIssue(projectID string, version int, groupHash string, event Event) string {
+	var issueID string
+	if err := p.db.QueryRow(`SELECT issue_id FROM sentryx_grouping_hashes WHERE project_id=$1 AND grouping_version=$2 AND group_hash=$3`, projectID, version, groupHash).Scan(&issueID); err == nil {
+		return issueID
+	}
+	if version > 1 {
+		legacyHash := GroupingHashForVersion(event, "v1")
+		if err := p.db.QueryRow(`SELECT issue_id FROM sentryx_grouping_hashes WHERE project_id=$1 AND grouping_version=1 AND group_hash=$2`, projectID, legacyHash).Scan(&issueID); err == nil {
+			return issueID
+		}
+	}
+	return ""
 }
 
 func isExtendedSignalType(value string) bool {
@@ -252,7 +282,7 @@ func (p *PostgresStore) persistAttachment(projectID string, item envelopeItem, n
 }
 
 func (p *PostgresStore) ListIssues(projectID string) []Issue {
-	rows, err := p.db.Query(`SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression FROM sentryx_issues WHERE ($1 = '' OR project_id=$1) ORDER BY last_seen DESC`, projectID)
+	rows, err := p.db.Query(`SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window FROM sentryx_issues WHERE ($1 = '' OR project_id=$1) ORDER BY last_seen DESC`, projectID)
 	if err != nil {
 		return nil
 	}
@@ -260,7 +290,7 @@ func (p *PostgresStore) ListIssues(projectID string) []Issue {
 	result := make([]Issue, 0)
 	for rows.Next() {
 		var issue Issue
-		if err := rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression); err == nil {
+		if err := rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow); err == nil {
 			result = append(result, issue)
 		}
 	}
@@ -351,7 +381,7 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 	if options.Sort == "count" || options.Sort == "users" {
 		order = "count DESC, id DESC"
 	}
-	query := `SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression FROM sentryx_issues WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)+1)
+	query := `SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window FROM sentryx_issues WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)+1)
 	args = append(args, options.Limit+1)
 	rows, err := p.db.Query(query, args...)
 	if err != nil {
@@ -361,7 +391,7 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 	result := make([]Issue, 0, options.Limit)
 	for rows.Next() {
 		var issue Issue
-		if rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression) == nil {
+		if rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow) == nil {
 			result = append(result, issue)
 		}
 	}
@@ -432,7 +462,7 @@ func (p *PostgresStore) SetIssueStatus(issueID, status, resolvedInRelease string
 		return Issue{}, fmt.Errorf("invalid issue status")
 	}
 	var issue Issue
-	err := p.db.QueryRow(`UPDATE sentryx_issues SET status=$1,status_changed_at=now(),resolved_in_release=NULLIF($2,''),regression=false WHERE id=$3 RETURNING id,project_id,title,level,count,first_seen,last_seen,latest_event_id,group_hash,status,status_changed_at,COALESCE(resolved_in_release,''),ignore_until,regression`, status, resolvedInRelease, issueID).Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression)
+	err := p.db.QueryRow(`UPDATE sentryx_issues SET status=$1,status_changed_at=now(),resolved_in_release=NULLIF($2,''),regression=false,ignore_count=ignore_count+CASE WHEN $1='ignored' THEN 1 ELSE 0 END WHERE id=$3 RETURNING id,project_id,title,level,count,first_seen,last_seen,latest_event_id,group_hash,status,status_changed_at,COALESCE(resolved_in_release,''),ignore_until,regression,ignore_count,ignore_window`, status, resolvedInRelease, issueID).Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow)
 	return issue, err
 }
 

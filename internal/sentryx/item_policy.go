@@ -33,7 +33,10 @@ func ItemPolicyFromEnv() ItemPolicy { return ParseItemPolicy(os.Getenv("SENTRYX_
 func (p ItemPolicy) action(item envelopeItem) string {
 	action := strings.ToLower(strings.TrimSpace(p[item.Type]))
 	if action == "" {
-		return "store"
+		if item.Type == "event" || item.Type == "error" || item.Type == "client_report" || item.Type == "attachment" || isExtendedSignalType(item.Type) {
+			return "store"
+		}
+		return "drop"
 	}
 	if strings.HasPrefix(action, "sample:") {
 		percent, _ := strconv.Atoi(strings.TrimPrefix(action, "sample:"))

@@ -6,6 +6,8 @@ ALTER TABLE sentryx_issues ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPT
 ALTER TABLE sentryx_issues ADD COLUMN IF NOT EXISTS resolved_in_release TEXT;
 ALTER TABLE sentryx_issues ADD COLUMN IF NOT EXISTS ignore_until TIMESTAMPTZ;
 ALTER TABLE sentryx_issues ADD COLUMN IF NOT EXISTS regression BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE sentryx_issues ADD COLUMN IF NOT EXISTS ignore_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE sentryx_issues ADD COLUMN IF NOT EXISTS ignore_window INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS sentryx_issues_project_status_seen_idx
   ON sentryx_issues (project_id, status, last_seen DESC);
 

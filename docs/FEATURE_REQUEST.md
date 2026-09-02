@@ -44,13 +44,15 @@ worker evaluates rules every 30 seconds outside the ingest transaction.
 
 ## Retention, security, and reconciliation
 
-Migration `006_feature_request.sql` adds issue lifecycle columns, hourly
+Migrations `006_feature_request.sql` and `007_grouping_migration.sql` add issue lifecycle columns, hourly
 rollups, alert rules, nullable completed-job payloads, and project retention
-configuration. The worker performs batched cleanup hourly and clears queue
+configuration, plus persisted grouping-hash mappings and component trees. The worker performs batched cleanup hourly and clears queue
 payloads on acknowledgement. `SENTRYX_API_TOKEN_HASHES` accepts
 `sha256hex:user-id` entries; plaintext `SENTRYX_API_TOKENS` remains supported
 for local compatibility. `cmd/sentryx-reconcile` compares event IDs in the
-new and legacy stores and reports both sides' missing IDs.
+new and legacy stores and reports both sides' missing IDs. `sentryx-groupctl`
+replays JSONL or PostgreSQL events and reports grouping changes between two
+algorithm versions.
 
 ## Operations
 

@@ -162,6 +162,46 @@ func (a *App) handleProjectAPI(w http.ResponseWriter, r *http.Request, parts []s
 		writeJSON(w, http.StatusOK, a.Control.ListProjectTeams(orgRef, projectRef))
 		return
 	}
+	if len(parts) == 6 && parts[5] == "keys" {
+		keys, ok := a.Control.(ProjectKeyStore)
+		if !ok {
+			http.Error(w, "project keys unavailable", http.StatusNotImplemented)
+			return
+		}
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, keys.ListProjectKeys(orgRef, projectRef))
+			return
+		}
+		if r.Method == http.MethodPost {
+			var request struct {
+				Name string `json:"name"`
+			}
+			if err := decodeJSONBody(r, &request); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			key, err := keys.CreateProjectKey(orgRef, projectRef, request.Name)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+			writeJSON(w, http.StatusCreated, key)
+			return
+		}
+	}
+	if len(parts) == 7 && parts[5] == "keys" && r.Method == http.MethodDelete {
+		keys, ok := a.Control.(ProjectKeyStore)
+		if !ok {
+			http.Error(w, "project keys unavailable", http.StatusNotImplemented)
+			return
+		}
+		if err := keys.RevokeProjectKey(orgRef, projectRef, parts[6]); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if len(parts) == 7 && parts[5] == "teams" && r.Method == http.MethodPost {
 		team, err := a.Control.AddProjectTeam(orgRef, projectRef, parts[6])
 		if err != nil {

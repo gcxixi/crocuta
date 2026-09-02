@@ -169,6 +169,8 @@ type Issue struct {
 	ResolvedInRelease string     `json:"resolved_in_release,omitempty"`
 	IgnoreUntil       *time.Time `json:"ignore_until,omitempty"`
 	Regression        bool       `json:"regression"`
+	IgnoreCount       int64      `json:"ignore_count,omitempty"`
+	IgnoreWindow      int        `json:"ignore_window,omitempty"`
 }
 
 type Store struct {
@@ -598,6 +600,9 @@ func readEnvelopeBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([
 
 func (a *App) validProjectKey(projectID, key string) bool {
 	if len(a.ProjectKeys) == 0 {
+		if a.Control != nil {
+			return a.Control.ValidProjectKey(projectID, key)
+		}
 		return true
 	}
 	keys, ok := a.ProjectKeys[projectID]
@@ -1324,13 +1329,18 @@ func scrubString(value string) string {
 }
 
 func groupingHash(event Event) string {
+	return GroupingHashForVersion(event, groupingVersion())
+}
+
+// GroupingHashForVersion exposes deterministic grouping for replay tools and
+// migration jobs without coupling them to the active process configuration.
+func GroupingHashForVersion(event Event, version string) string {
 	if len(event.Fingerprint) > 0 && !containsDefault(event.Fingerprint) {
 		return "fp:" + strings.Join(event.Fingerprint, "|")
 	}
-	if groupingVersion() == "v1" {
+	if version == "v1" || version == "1" {
 		return groupingHashV1(event)
 	}
-	version := groupingVersion()
 	parts := []string{version, event.Platform, normalizeMessage(event.Message)}
 	if event.Exception != nil {
 		var ex exceptionValue
@@ -1349,6 +1359,23 @@ func groupingHash(event Event) string {
 		parts = append(parts, normalizePath(event.Culprit))
 	}
 	return shortHash(strings.Join(parts, "\x00"))
+}
+
+// GroupingComponents returns the normalized inputs used by the grouping hash.
+// Persisting this component tree makes future merge/split decisions auditable.
+func GroupingComponents(event Event, version string) map[string]any {
+	frames := event.SymbolicatedFrames
+	if len(frames) == 0 {
+		var ex exceptionValue
+		if json.Unmarshal(event.Exception, &ex) == nil {
+			frames = ex.Stacktrace.Frames
+		}
+	}
+	normalizedFrames := make([]map[string]string, 0)
+	for _, frame := range groupingFrames(frames) {
+		normalizedFrames = append(normalizedFrames, map[string]string{"filename": normalizePath(frame.Filename), "function": strings.TrimSpace(frame.Function)})
+	}
+	return map[string]any{"version": version, "message": normalizeMessage(event.Message), "platform": event.Platform, "frames": normalizedFrames}
 }
 
 // groupingHashV1 is retained so existing issues remain addressable during a
@@ -1431,6 +1458,7 @@ func normalizePath(value string) string {
 	value = strings.TrimSuffix(value, ".cjs")
 	value = strings.ReplaceAll(value, "\\", "/")
 	value = contentHash.ReplaceAllString(value, "$1$2")
+	value = strings.TrimSuffix(value, ".")
 	value = strings.ReplaceAll(value, "webpack-internal:///", "")
 	return value
 }

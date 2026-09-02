@@ -100,6 +100,12 @@ type ControlPlane interface {
 	EnsureProject(projectID, publicKey string) error
 }
 
+type ProjectKeyStore interface {
+	ListProjectKeys(orgRef, projectRef string) []ProjectKey
+	CreateProjectKey(orgRef, projectRef, name string) (ProjectKey, error)
+	RevokeProjectKey(orgRef, projectRef, keyID string) error
+}
+
 type memoryControlPlane struct {
 	mu            sync.RWMutex
 	organizations map[string]Organization
@@ -367,6 +373,52 @@ func (m *memoryControlPlane) EnsureProject(projectID, publicKey string) error {
 	key.DSN = "http://" + url.QueryEscape(publicKey) + "@localhost/" + url.PathEscape(projectID)
 	m.keys[projectID] = []ProjectKey{key}
 	return nil
+}
+
+func (m *memoryControlPlane) ListProjectKeys(orgRef, projectRef string) []ProjectKey {
+	project, ok := m.GetProject(orgRef, projectRef)
+	if !ok {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]ProjectKey(nil), m.keys[project.ID]...)
+}
+
+func (m *memoryControlPlane) CreateProjectKey(orgRef, projectRef, name string) (ProjectKey, error) {
+	project, ok := m.GetProject(orgRef, projectRef)
+	if !ok {
+		return ProjectKey{}, errors.New("project not found")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.TrimSpace(name) == "" {
+		name = "Key"
+	}
+	key := ProjectKey{ID: m.nextID(), ProjectID: project.ID, Name: name, Public: "public-" + randomID()[:16], Secret: randomID()}
+	key.DSN = "http://" + url.QueryEscape(key.Public) + "@localhost/" + url.PathEscape(project.ID)
+	m.keys[project.ID] = append(m.keys[project.ID], key)
+	return key, nil
+}
+
+func (m *memoryControlPlane) RevokeProjectKey(orgRef, projectRef, keyID string) error {
+	project, ok := m.GetProject(orgRef, projectRef)
+	if !ok {
+		return errors.New("project not found")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := m.keys[project.ID]
+	for i, key := range keys {
+		if key.ID == keyID {
+			if len(keys) == 1 {
+				return errors.New("cannot revoke the last project key")
+			}
+			m.keys[project.ID] = append(keys[:i], keys[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("project key not found")
 }
 
 func (m *memoryControlPlane) withProjectRelations(project ControlProject) ControlProject {

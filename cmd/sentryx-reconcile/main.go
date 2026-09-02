@@ -13,6 +13,7 @@ import (
 
 type event struct {
 	EventID string `json:"event_id"`
+	IssueID string `json:"issue_id"`
 }
 
 func main() {
@@ -38,7 +39,18 @@ func main() {
 	}
 	newSet, oldSet := ids(newEvents), ids(oldEvents)
 	missingFromNew, missingFromOld := difference(oldSet, newSet), difference(newSet, oldSet)
-	result := map[string]any{"project": *project, "new_count": len(newSet), "old_count": len(oldSet), "matched": len(newSet) - len(missingFromOld), "missing_from_new": missingFromNew, "missing_from_old": missingFromOld}
+	mismatched := []string{}
+	oldByID := map[string]string{}
+	for _, item := range oldEvents {
+		oldByID[item.EventID] = item.IssueID
+	}
+	for _, item := range newEvents {
+		if oldIssue, ok := oldByID[item.EventID]; ok && oldIssue != "" && item.IssueID != "" && oldIssue != item.IssueID {
+			mismatched = append(mismatched, item.EventID)
+		}
+	}
+	sort.Strings(mismatched)
+	result := map[string]any{"project": *project, "new_count": len(newSet), "old_count": len(oldSet), "matched": len(newSet) - len(missingFromOld), "missing_from_new": missingFromNew, "missing_from_old": missingFromOld, "grouping_mismatch": mismatched}
 	encoded, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Println(string(encoded))
 }

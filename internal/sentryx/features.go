@@ -303,6 +303,9 @@ func (s *Store) SetIssueStatus(issueID, status, resolvedInRelease string) (Issue
 	issue.StatusChangedAt = time.Now().UTC()
 	issue.ResolvedInRelease = resolvedInRelease
 	issue.Regression = false
+	if status == "ignored" {
+		issue.IgnoreCount++
+	}
 	return *issue, nil
 }
 
@@ -448,6 +451,21 @@ func (m *Metrics) Inc(name string, labels map[string]string) {
 		m.mu.Unlock()
 	}
 	counter.Add(1)
+}
+
+func (m *Metrics) Set(name string, labels map[string]string, value uint64) {
+	if m == nil {
+		return
+	}
+	key := metricKey(name, labels)
+	m.mu.Lock()
+	counter := m.counters[key]
+	if counter == nil {
+		counter = &atomic.Uint64{}
+		m.counters[key] = counter
+	}
+	m.mu.Unlock()
+	counter.Store(value)
 }
 
 func (m *Metrics) Snapshot() map[string]uint64 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -81,8 +82,9 @@ func NewRelayWithConfigAndMirrorAndPolicy(upstream, mirror string, maxBody int64
 				return
 			}
 		}
+		droppedItems := 0
 		if isEnvelopePath(r.URL.Path) {
-			body, _, err = ApplyItemPolicy(body, itemPolicy)
+			body, droppedItems, err = ApplyItemPolicy(body, itemPolicy)
 			if err != nil {
 				http.Error(w, "invalid envelope", http.StatusBadRequest)
 				return
@@ -109,6 +111,7 @@ func NewRelayWithConfigAndMirrorAndPolicy(upstream, mirror string, maxBody int64
 					}()
 				default:
 					cancelMirror()
+					DefaultMetrics.Inc("sentryx_mirror_dropped_total", map[string]string{"reason": "capacity"})
 					slog.Default().Warn("relay mirror capacity exhausted", "path", r.URL.Path)
 				}
 			} else {
@@ -123,11 +126,35 @@ func NewRelayWithConfigAndMirrorAndPolicy(upstream, mirror string, maxBody int64
 			return
 		}
 		defer response.Body.Close()
+		responseBody, _ := io.ReadAll(response.Body)
+		responseBody = addDroppedAccepted(responseBody, droppedItems)
 		copyRelayResponseHeaders(w.Header(), response.Header)
+		w.Header().Del("Content-Length")
+		w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 		DefaultMetrics.Inc("sentryx_relay_requests_total", map[string]string{"status": strconv.Itoa(response.StatusCode)})
 		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
+		_, _ = w.Write(responseBody)
 	})
+}
+
+func addDroppedAccepted(body []byte, dropped int) []byte {
+	if dropped <= 0 {
+		return body
+	}
+	var response map[string]any
+	if json.Unmarshal(body, &response) != nil {
+		return body
+	}
+	accepted, ok := response["accepted"].(float64)
+	if !ok {
+		return body
+	}
+	response["accepted"] = int(accepted) + dropped
+	updated, err := json.Marshal(response)
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 func newRelayRequest(source *http.Request, targetURL string, body []byte, scrub bool, token string) (*http.Request, error) {
