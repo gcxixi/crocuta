@@ -110,24 +110,9 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 	if poll <= 0 {
 		poll = 250 * time.Millisecond
 	}
-	cleanupTicker := time.NewTicker(1 * time.Hour)
-	defer cleanupTicker.Stop()
-	alertTicker := time.NewTicker(30 * time.Second)
-	defer alertTicker.Stop()
+	go p.runRetentionLoop(ctx)
+	go p.runAlertLoop(ctx)
 	for {
-		select {
-		case <-cleanupTicker.C:
-			if deleted, err := p.CleanupExpired(ctx, 30*24*time.Hour); err != nil {
-				fmt.Printf("sentryx retention cleanup failed: %v\n", err)
-			} else if deleted > 0 {
-				DefaultMetrics.Inc("sentryx_retention_deleted_total", map[string]string{"kind": "events"})
-			}
-		case <-alertTicker.C:
-			if err := p.EvaluateAlerts(ctx); err != nil {
-				DefaultMetrics.Inc("sentryx_alert_evaluation_errors_total", nil)
-			}
-		default:
-		}
 		jobs, err := p.LeaseJobs(ctx, batch, 30*time.Second)
 		for state, count := range p.QueueDepth(ctx) {
 			DefaultMetrics.Set("sentryx_queue_depth", map[string]string{"state": state}, uint64(count))
@@ -171,9 +156,40 @@ func (p *PostgresStore) RunWorker(ctx context.Context, batch int, poll time.Dura
 	}
 }
 
-// CleanupExpired removes event data outside the configured retention window.
-// A later partitioned deployment can replace these deletes without changing
-// the worker contract.
+func (p *PostgresStore) runRetentionLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := p.CleanupExpired(ctx, 30*24*time.Hour); err != nil {
+				fmt.Printf("sentryx retention cleanup failed: %v\n", err)
+			}
+		}
+	}
+}
+
+func (p *PostgresStore) runAlertLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := p.EvaluateAlerts(ctx); err != nil {
+				DefaultMetrics.Inc("sentryx_alert_evaluation_errors_total", nil)
+				fmt.Printf("sentryx alert evaluation failed: %v\n", err)
+			}
+		}
+	}
+}
+
+// CleanupExpired removes expired rows in bounded transactions. It runs outside
+// the ingest loop and reclaims associated blob objects after relational rows
+// have been removed, so object-store failures cannot hold database locks.
 func (p *PostgresStore) CleanupExpired(ctx context.Context, fallback time.Duration) (int64, error) {
 	if fallback <= 0 {
 		fallback = 30 * 24 * time.Hour
@@ -182,21 +198,95 @@ func (p *PostgresStore) CleanupExpired(ctx context.Context, fallback time.Durati
 	if days < 1 {
 		days = 1
 	}
-	var deleted int64
-	queries := []string{
-		`DELETE FROM sentryx_events e WHERE e.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=e.project_id), $1))`,
-		`DELETE FROM sentryx_signals s WHERE s.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=s.project_id), $1))`,
-		`DELETE FROM sentryx_attachments a WHERE a.created_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=a.project_id), $1))`,
-		`DELETE FROM sentryx_client_reports c WHERE c.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=c.project_id), $1))`,
-		`DELETE FROM sentryx_ingest_jobs j WHERE j.state IN ('completed','dead') AND COALESCE(j.completed_at,j.received_at) < now()-make_interval(days => $1)`,
+	connection, err := p.db.Conn(ctx)
+	if err != nil {
+		return 0, err
 	}
-	for _, query := range queries {
-		result, err := p.db.ExecContext(ctx, query, days)
-		if err != nil {
-			return deleted, err
+	defer connection.Close()
+	var locked bool
+	if err := connection.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext('sentryx-retention-cleanup'))`).Scan(&locked); err != nil {
+		return 0, err
+	}
+	if !locked {
+		return 0, nil
+	}
+	defer connection.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtext('sentryx-retention-cleanup'))`)
+	const batchSize = 5000
+	type cleanupTarget struct {
+		kind     string
+		query    string
+		withBlob bool
+	}
+	targets := []cleanupTarget{
+		{"events", `DELETE FROM sentryx_events WHERE ctid IN (SELECT e.ctid FROM sentryx_events e WHERE e.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=e.project_id), $1)) LIMIT $2)`, false},
+		{"issue_stats", `DELETE FROM sentryx_issue_stats_hourly WHERE ctid IN (SELECT s.ctid FROM sentryx_issue_stats_hourly s WHERE s.bucket < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=s.project_id), $1)) LIMIT $2)`, false},
+		{"tag_stats", `DELETE FROM sentryx_issue_tag_values_hourly WHERE ctid IN (SELECT s.ctid FROM sentryx_issue_tag_values_hourly s WHERE s.bucket < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=s.project_id), $1)) LIMIT $2)`, false},
+		{"signals", `DELETE FROM sentryx_signals WHERE ctid IN (SELECT s.ctid FROM sentryx_signals s WHERE s.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=s.project_id), $1)) LIMIT $2) RETURNING COALESCE(blob_key,'')`, true},
+		{"attachments", `DELETE FROM sentryx_attachments WHERE ctid IN (SELECT a.ctid FROM sentryx_attachments a WHERE a.created_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=a.project_id), $1)) LIMIT $2) RETURNING COALESCE(blob_key,'')`, true},
+		{"client_reports", `DELETE FROM sentryx_client_reports WHERE ctid IN (SELECT c.ctid FROM sentryx_client_reports c WHERE c.received_at < now()-make_interval(days => COALESCE((SELECT retention_days FROM sentryx_control_projects WHERE id=c.project_id), $1)) LIMIT $2)`, false},
+		{"jobs", `DELETE FROM sentryx_ingest_jobs WHERE ctid IN (SELECT j.ctid FROM sentryx_ingest_jobs j WHERE j.state IN ('completed','dead') AND COALESCE(j.completed_at,j.received_at) < now()-make_interval(days => $1) LIMIT $2)`, false},
+	}
+	var deleted int64
+	for _, target := range targets {
+		for {
+			var count int64
+			var blobKeys []string
+			if target.withBlob {
+				rows, err := connection.QueryContext(ctx, target.query, days, batchSize)
+				if err != nil {
+					return deleted, err
+				}
+				for rows.Next() {
+					var key string
+					if err := rows.Scan(&key); err != nil {
+						rows.Close()
+						return deleted, err
+					}
+					count++
+					if key != "" {
+						blobKeys = append(blobKeys, key)
+					}
+				}
+				err = rows.Err()
+				rows.Close()
+				if err != nil {
+					return deleted, err
+				}
+			} else {
+				result, err := connection.ExecContext(ctx, target.query, days, batchSize)
+				if err != nil {
+					return deleted, err
+				}
+				count, _ = result.RowsAffected()
+			}
+			deleted += count
+			if count > 0 {
+				DefaultMetrics.Add("sentryx_retention_deleted_total", map[string]string{"kind": target.kind}, uint64(count))
+			}
+			if deleter, ok := p.blobDeleter(); ok {
+				for _, key := range blobKeys {
+					if err := deleter.Delete(ctx, key); err != nil {
+						DefaultMetrics.Inc("sentryx_blob_gc_errors_total", map[string]string{"kind": target.kind})
+					}
+				}
+			}
+			if count < batchSize {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return deleted, ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
-		count, _ := result.RowsAffected()
-		deleted += count
 	}
 	return deleted, nil
+}
+
+func (p *PostgresStore) blobDeleter() (BlobDeleter, bool) {
+	if p.artifacts == nil || p.artifacts.blob == nil {
+		return nil, false
+	}
+	deleter, ok := p.artifacts.blob.(BlobDeleter)
+	return deleter, ok
 }

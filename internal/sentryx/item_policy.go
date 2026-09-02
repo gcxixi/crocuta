@@ -40,7 +40,16 @@ func (p ItemPolicy) action(item envelopeItem) string {
 	}
 	if strings.HasPrefix(action, "sample:") {
 		percent, _ := strconv.Atoi(strings.TrimPrefix(action, "sample:"))
-		if percent <= 0 || hashSample(item.EventID+":"+item.Type+":"+string(item.Payload))%100 >= uint64(percent) {
+		sampleID := item.EventID
+		if sampleID == "" {
+			if value, ok := item.Header["session_id"].(string); ok {
+				sampleID = value
+			}
+		}
+		if sampleID == "" {
+			sampleID = artifactDigest(item.Payload)
+		}
+		if percent <= 0 || hashSample(sampleID+":"+item.Type)%100 >= uint64(percent) {
 			return "drop"
 		}
 		return "store"
@@ -59,7 +68,13 @@ func ApplyItemPolicy(body []byte, policy ItemPolicy) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	result := bytes.NewBufferString("{}\n")
+	header, _, err := nextLine(body, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	result := bytes.NewBuffer(nil)
+	result.Write(header)
+	result.WriteByte('\n')
 	dropped := 0
 	for _, item := range items {
 		if policy.action(item) == "drop" {
@@ -68,17 +83,13 @@ func ApplyItemPolicy(body []byte, policy ItemPolicy) ([]byte, int, error) {
 			continue
 		}
 		DefaultMetrics.Inc("sentryx_envelope_items_total", map[string]string{"type": item.Type, "action": "store"})
-		header := map[string]any{"type": item.Type, "length": len(item.Payload)}
-		if item.EventID != "" {
-			header["event_id"] = item.EventID
+		itemHeader := make(map[string]any, len(item.Header)+1)
+		for key, value := range item.Header {
+			itemHeader[key] = value
 		}
-		if item.Filename != "" {
-			header["filename"] = item.Filename
-		}
-		if item.ContentType != "" {
-			header["content_type"] = item.ContentType
-		}
-		encoded, _ := json.Marshal(header)
+		itemHeader["type"] = item.Type
+		itemHeader["length"] = len(item.Payload)
+		encoded, _ := json.Marshal(itemHeader)
 		result.Write(encoded)
 		result.WriteByte('\n')
 		result.Write(item.Payload)

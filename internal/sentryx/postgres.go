@@ -165,6 +165,7 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			} else {
 				event.SymbolicationStatus = "miss"
 			}
+			DefaultMetrics.Inc("sentryx_symbolication_total", map[string]string{"project": event.ProjectID, "release": event.Release, "status": event.SymbolicationStatus})
 		}
 		groupHash := groupingHash(event)
 		groupVersion := groupingVersionNumber()
@@ -204,12 +205,14 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			tx.Rollback()
 			return accepted, err
 		}
+		issueID = returnedIssueID
+		event.IssueID = returnedIssueID
 		result, err := tx.Exec(`
 			INSERT INTO sentryx_events
 			  (project_id, event_id, issue_id, occurred_at, received_at, canonical_json)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (project_id, event_id) DO NOTHING`,
-			projectID, event.EventID, issueID, event.OccurredAt, event.ReceivedAt, mustJSON(event))
+			projectID, event.EventID, returnedIssueID, event.OccurredAt, event.ReceivedAt, mustJSON(event))
 		if err != nil {
 			tx.Rollback()
 			return accepted, err
@@ -223,11 +226,23 @@ func (p *PostgresStore) processPayload(projectID string, body []byte) (accepted 
 			continue
 		}
 		_, _ = tx.Exec(`INSERT INTO sentryx_grouping_hashes (project_id, grouping_version, group_hash, issue_id, components) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, projectID, groupVersion, groupHash, returnedIssueID, mustJSON(GroupingComponents(event, groupingVersion())))
+		bucket := event.ReceivedAt.UTC().Truncate(time.Hour)
+		if _, err := tx.Exec(`INSERT INTO sentryx_issue_stats_hourly (project_id, issue_id, bucket, event_count, user_count) VALUES ($1,$2,$3,1,$4) ON CONFLICT (project_id,issue_id,bucket) DO UPDATE SET event_count=sentryx_issue_stats_hourly.event_count+1, user_count=sentryx_issue_stats_hourly.user_count+EXCLUDED.user_count`, projectID, returnedIssueID, bucket, userCount(event)); err != nil {
+			tx.Rollback()
+			return accepted, err
+		}
+		for key, value := range event.Tags {
+			if value == "" {
+				continue
+			}
+			if _, err := tx.Exec(`INSERT INTO sentryx_issue_tag_values_hourly (project_id,issue_id,bucket,tag_key,tag_value,event_count) VALUES ($1,$2,$3,$4,$5,1) ON CONFLICT (project_id,issue_id,bucket,tag_key,tag_value) DO UPDATE SET event_count=sentryx_issue_tag_values_hourly.event_count+1`, projectID, returnedIssueID, bucket, key, value); err != nil {
+				tx.Rollback()
+				return accepted, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return accepted, err
 		}
-		bucket := event.ReceivedAt.UTC().Truncate(time.Hour)
-		_, _ = p.db.Exec(`INSERT INTO sentryx_issue_stats_hourly (project_id, issue_id, bucket, event_count, user_count) VALUES ($1,$2,$3,1,$4) ON CONFLICT (project_id,issue_id,bucket) DO UPDATE SET event_count=sentryx_issue_stats_hourly.event_count+1, user_count=sentryx_issue_stats_hourly.user_count+EXCLUDED.user_count`, projectID, returnedIssueID, bucket, userCount(event))
 		accepted++
 	}
 	return accepted, nil
@@ -358,7 +373,7 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 				args = append(args, parsed, id)
 				where = append(where, fmt.Sprintf("(first_seen < $%d OR (first_seen = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
 			}
-		case "count", "users":
+		case "count":
 			countKey := strings.TrimLeft(key, "0")
 			if countKey == "" {
 				countKey = "0"
@@ -366,6 +381,15 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 			if parsed, err := strconv.ParseInt(countKey, 10, 64); err == nil {
 				args = append(args, parsed, id)
 				where = append(where, fmt.Sprintf("(count < $%d OR (count = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
+			}
+		case "users":
+			usersKey := strings.TrimLeft(key, "0")
+			if usersKey == "" {
+				usersKey = "0"
+			}
+			if parsed, err := strconv.ParseInt(usersKey, 10, 64); err == nil {
+				args = append(args, parsed, id)
+				where = append(where, fmt.Sprintf("((SELECT count(DISTINCT CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id') WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END) FROM sentryx_events e WHERE e.issue_id=sentryx_issues.id) < $%d OR ((SELECT count(DISTINCT CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id') WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END) FROM sentryx_events e WHERE e.issue_id=sentryx_issues.id) = $%d AND id < $%d))", len(args)-1, len(args)-1, len(args)))
 			}
 		default:
 			if parsed, err := time.Parse(time.RFC3339Nano, key); err == nil {
@@ -378,10 +402,15 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 	if options.Sort == "first_seen" {
 		order = "first_seen DESC, id DESC"
 	}
-	if options.Sort == "count" || options.Sort == "users" {
+	if options.Sort == "count" {
 		order = "count DESC, id DESC"
 	}
-	query := `SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window FROM sentryx_issues WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)+1)
+	usersExpr := "0"
+	if options.Sort == "users" {
+		usersExpr = `(SELECT count(DISTINCT CASE WHEN COALESCE(e.canonical_json->'user'->>'id','') <> '' THEN 'id:'||(e.canonical_json->'user'->>'id') WHEN COALESCE(e.canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(e.canonical_json->'user'->>'email') END) FROM sentryx_events e WHERE e.issue_id=sentryx_issues.id)`
+		order = usersExpr + " DESC, id DESC"
+	}
+	query := `SELECT id, project_id, title, level, count, first_seen, last_seen, latest_event_id, group_hash, status, status_changed_at, COALESCE(resolved_in_release,''), ignore_until, regression, ignore_count, ignore_window, ` + usersExpr + ` AS users FROM sentryx_issues WHERE ` + strings.Join(where, " AND ") + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)+1)
 	args = append(args, options.Limit+1)
 	rows, err := p.db.Query(query, args...)
 	if err != nil {
@@ -391,7 +420,7 @@ func (p *PostgresStore) ListIssuesPage(options QueryOptions) IssuePage {
 	result := make([]Issue, 0, options.Limit)
 	for rows.Next() {
 		var issue Issue
-		if rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow) == nil {
+		if rows.Scan(&issue.ID, &issue.ProjectID, &issue.Title, &issue.Level, &issue.Count, &issue.FirstSeen, &issue.LastSeen, &issue.LatestEvent, &issue.GroupHash, &issue.Status, &issue.StatusChangedAt, &issue.ResolvedInRelease, &issue.IgnoreUntil, &issue.Regression, &issue.IgnoreCount, &issue.IgnoreWindow, &issue.Users) == nil {
 			result = append(result, issue)
 		}
 	}
@@ -477,7 +506,11 @@ func (p *PostgresStore) IssueSeries(projectID, issueID string, start, end time.T
 	if resolution <= 0 {
 		resolution = time.Hour
 	}
-	rows, err := p.db.Query(`SELECT date_trunc('hour',bucket), SUM(event_count), SUM(user_count) FROM sentryx_issue_stats_hourly WHERE project_id=$1 AND issue_id=$2 AND ($3::timestamptz IS NULL OR bucket >= $3) AND ($4::timestamptz IS NULL OR bucket < $4) GROUP BY 1 ORDER BY 1`, projectID, issueID, nullableTime(start), nullableTime(end))
+	seconds := int64(resolution / time.Second)
+	if seconds < 1 {
+		seconds = 3600
+	}
+	rows, err := p.db.Query(`SELECT to_timestamp(floor(extract(epoch from received_at)/$5)*$5), count(*), count(DISTINCT CASE WHEN COALESCE(canonical_json->'user'->>'id','') <> '' THEN 'id:'||(canonical_json->'user'->>'id') WHEN COALESCE(canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(canonical_json->'user'->>'email') END) FROM sentryx_events WHERE project_id=$1 AND issue_id=$2 AND ($3::timestamptz IS NULL OR received_at >= $3) AND ($4::timestamptz IS NULL OR received_at < $4) GROUP BY 1 ORDER BY 1`, projectID, issueID, nullableTime(start), nullableTime(end), seconds)
 	if err != nil {
 		return nil
 	}
@@ -496,7 +529,7 @@ func (p *PostgresStore) IssueTagValues(projectID, issueID, key string, start, en
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := p.db.Query(`SELECT COALESCE(canonical_json->'tags'->>$3,''), count(*) FROM sentryx_events WHERE project_id=$1 AND issue_id=$2 AND ($4::timestamptz IS NULL OR received_at >= $4) AND ($5::timestamptz IS NULL OR received_at < $5) GROUP BY 1 ORDER BY 2 DESC LIMIT $6`, projectID, issueID, key, nullableTime(start), nullableTime(end), limit)
+	rows, err := p.db.Query(`SELECT tag_value, SUM(event_count) FROM sentryx_issue_tag_values_hourly WHERE project_id=$1 AND issue_id=$2 AND tag_key=$3 AND ($4::timestamptz IS NULL OR bucket >= date_trunc('hour',$4::timestamptz)) AND ($5::timestamptz IS NULL OR bucket < $5) GROUP BY tag_value ORDER BY 2 DESC LIMIT $6`, projectID, issueID, key, nullableTime(start), nullableTime(end), limit)
 	if err != nil {
 		return nil
 	}
@@ -515,8 +548,8 @@ func (p *PostgresStore) ProjectStats(projectID string, start, end time.Time) map
 	result := map[string]int64{"errors": 0, "issues": 0, "users": 0}
 	var errorsCount, issueCount, userCountValue int64
 	_ = p.db.QueryRow(`SELECT count(*) FROM sentryx_events WHERE project_id=$1 AND ($2::timestamptz IS NULL OR received_at >= $2) AND ($3::timestamptz IS NULL OR received_at < $3)`, projectID, nullableTime(start), nullableTime(end)).Scan(&errorsCount)
-	_ = p.db.QueryRow(`SELECT count(*) FROM sentryx_issues WHERE project_id=$1`, projectID).Scan(&issueCount)
-	_ = p.db.QueryRow(`SELECT count(DISTINCT NULLIF(COALESCE(canonical_json->'user'->>'id',canonical_json->'user'->>'email'),'')) FROM sentryx_events WHERE project_id=$1`, projectID).Scan(&userCountValue)
+	_ = p.db.QueryRow(`SELECT count(DISTINCT issue_id) FROM sentryx_events WHERE project_id=$1 AND ($2::timestamptz IS NULL OR received_at >= $2) AND ($3::timestamptz IS NULL OR received_at < $3)`, projectID, nullableTime(start), nullableTime(end)).Scan(&issueCount)
+	_ = p.db.QueryRow(`SELECT count(DISTINCT CASE WHEN COALESCE(canonical_json->'user'->>'id','') <> '' THEN 'id:'||(canonical_json->'user'->>'id') WHEN COALESCE(canonical_json->'user'->>'email','') <> '' THEN 'email:'||lower(canonical_json->'user'->>'email') END) FROM sentryx_events WHERE project_id=$1 AND ($2::timestamptz IS NULL OR received_at >= $2) AND ($3::timestamptz IS NULL OR received_at < $3)`, projectID, nullableTime(start), nullableTime(end)).Scan(&userCountValue)
 	result["errors"], result["issues"], result["users"] = errorsCount, issueCount, userCountValue
 	return result
 }

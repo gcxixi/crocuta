@@ -25,6 +25,13 @@ type BlobStore interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 }
 
+// BlobDeleter is optional so existing read/write-only BlobStore
+// implementations remain source compatible while retention can reclaim
+// objects when the backend supports deletion.
+type BlobDeleter interface {
+	Delete(ctx context.Context, key string) error
+}
+
 // NewBlobStoreFromEnv selects the configured artifact backend. The default is
 // database-only for backwards compatibility; file and S3 modes are explicit.
 func NewBlobStoreFromEnv() (BlobStore, error) {
@@ -137,6 +144,20 @@ func (f *FileBlobStore) Get(ctx context.Context, key string) ([]byte, error) {
 	return body, nil
 }
 
+func (f *FileBlobStore) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	filename, err := f.filename(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filename); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (f *FileBlobStore) filename(key string) (string, error) {
 	clean := strings.TrimPrefix(path.Clean("/"+key), "/")
 	if clean == "" || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
@@ -196,6 +217,10 @@ func (s *S3BlobStore) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("blob exceeds %d bytes", limit)
 	}
 	return body, nil
+}
+
+func (s *S3BlobStore) Delete(ctx context.Context, key string) error {
+	return s.Client.RemoveObject(ctx, s.Bucket, s.objectKey(key), minio.RemoveObjectOptions{})
 }
 
 func (s *S3BlobStore) objectKey(key string) string {

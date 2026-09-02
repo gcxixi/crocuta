@@ -152,16 +152,12 @@ func (p *piiProcessor) scrubEnvelope(body []byte) ([]byte, error) {
 	for _, item := range items {
 		state := &piiState{meta: make(map[string]string)}
 		payload := p.scrubItem(item, state)
-		header := map[string]any{"type": item.Type, "length": len(payload)}
-		if item.EventID != "" {
-			header["event_id"] = item.EventID
+		header := make(map[string]any, len(item.Header)+1)
+		for key, value := range item.Header {
+			header[key] = value
 		}
-		if item.Filename != "" {
-			header["filename"] = item.Filename
-		}
-		if item.ContentType != "" {
-			header["content_type"] = item.ContentType
-		}
+		header["type"] = item.Type
+		header["length"] = len(payload)
 		headerBytes, _ := json.Marshal(header)
 		result = append(result, headerBytes...)
 		result = append(result, '\n')

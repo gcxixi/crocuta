@@ -160,6 +160,7 @@ type Issue struct {
 	Title             string     `json:"title"`
 	Level             string     `json:"level,omitempty"`
 	Count             int        `json:"count"`
+	Users             int64      `json:"users,omitempty"`
 	FirstSeen         time.Time  `json:"first_seen"`
 	LastSeen          time.Time  `json:"last_seen"`
 	LatestEvent       string     `json:"latest_event_id"`
@@ -336,7 +337,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, issue)
 		return
 	}
-	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodGet {
+	if len(parts) == 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "issues" && r.Method == http.MethodGet {
 		options := queryOptionsFromRequest(r)
 		if paged, ok := a.Store.(PagedStore); ok {
 			page := paged.ListIssuesPage(options)
@@ -347,7 +348,7 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.Store.ListIssues(options.ProjectID))
 		return
 	}
-	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "events" && r.Method == http.MethodGet {
+	if len(parts) == 3 && parts[0] == "api" && parts[1] == "0" && parts[2] == "events" && r.Method == http.MethodGet {
 		options := queryOptionsFromRequest(r)
 		if paged, ok := a.Store.(PagedStore); ok {
 			page := paged.ListEventsPage(options)
@@ -650,6 +651,9 @@ func (s *Store) Ingest(projectID, _ string, body []byte) (int, error) {
 			}
 			event = scrubEventWithConfig(event, s.PII)
 			s.symbolicate(&event)
+			if event.SymbolicationStatus != "" {
+				DefaultMetrics.Inc("sentryx_symbolication_total", map[string]string{"project": event.ProjectID, "release": event.Release, "status": event.SymbolicationStatus})
+			}
 			groupHash := groupingHash(event)
 			s.mu.Lock()
 			key := projectID + ":" + event.EventID
@@ -1068,7 +1072,7 @@ var (
 	dynamicNumber = regexp.MustCompile(`\b[0-9a-fA-F]{8,}\b|\b\d{2,}\b`)
 	dynamicUUID   = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f-]{27,}\b`)
 	dynamicURL    = regexp.MustCompile(`https?://[^\s]+`)
-	contentHash   = regexp.MustCompile(`(?i)([._-])[0-9a-f]{6,}(\.[a-z0-9]+)?$`)
+	contentHash   = regexp.MustCompile(`(?i)([._-])[0-9a-f]{8,}(\.[a-z0-9]+)?$`)
 )
 
 func normalizeMessage(message string) string {
@@ -1171,6 +1175,7 @@ func decodeEvent(projectID string, payload []byte, now time.Time) (Event, error)
 	event.Extra = mapValue(raw["extra"])
 	event.Contexts = mapValue(raw["contexts"])
 	event.Tags = stringMapValue(raw["tags"])
+	deriveEventTags(&event)
 	event.Modules = stringMapValue(raw["modules"])
 	event.SDK = mapValue(raw["sdk"])
 	event.DebugMeta = mapValue(raw["debug_meta"])
@@ -1187,6 +1192,45 @@ func decodeEvent(projectID string, payload []byte, now time.Time) (Event, error)
 		}
 	}
 	return event, nil
+}
+
+// deriveEventTags promotes dimensions emitted by standard Sentry SDKs into
+// the canonical tag set used by filtering and top-K APIs. Explicit SDK tags
+// win over derived values.
+func deriveEventTags(event *Event) {
+	if event.Tags == nil {
+		event.Tags = make(map[string]string)
+	}
+	set := func(key, value string) {
+		if value == "" {
+			return
+		}
+		if _, exists := event.Tags[key]; !exists {
+			event.Tags[key] = value
+		}
+	}
+	contextValue := func(kind, key string) string {
+		value, _ := event.Contexts[kind].(map[string]any)
+		return stringValue(value[key])
+	}
+	for _, kind := range []string{"browser", "os", "runtime"} {
+		set(kind+".name", contextValue(kind, "name"))
+		set(kind+".version", contextValue(kind, "version"))
+	}
+	set("release", event.Release)
+	set("environment", event.Environment)
+	set("dist", event.Dist)
+	set("transaction", event.Transaction)
+	if event.Request != nil {
+		set("url", event.Request.URL)
+	}
+	if event.User != nil {
+		identity := event.User.ID
+		if identity == "" {
+			identity = event.User.Email
+		}
+		set("user.id", identity)
+	}
 }
 
 func decodeRequest(value map[string]any) *Request {
@@ -1419,20 +1463,28 @@ func groupingVersion() string {
 	if value := strings.TrimSpace(os.Getenv("SENTRYX_GROUPING_VERSION")); value != "" {
 		return value
 	}
-	return "v1"
+	return "v2"
 }
 
 func groupingFrames(frames []StackFrame) []StackFrame {
 	result := make([]StackFrame, 0, 3)
+	fallback := make([]StackFrame, 0, 3)
 	for index := len(frames) - 1; index >= 0 && len(result) < 3; index-- {
 		frame := frames[index]
-		if !frame.InApp && len(result) > 0 {
-			continue
-		}
 		if frame.Filename == "" && frame.Function == "" {
 			continue
 		}
+		if len(fallback) < 3 {
+			fallback = append(fallback, frame)
+		}
+		filename := strings.ToLower(frame.Filename + " " + frame.AbsPath)
+		if !frame.InApp || strings.Contains(filename, "node_modules/") || strings.Contains(filename, "webpack-internal:///") {
+			continue
+		}
 		result = append(result, frame)
+	}
+	if len(result) == 0 {
+		result = fallback
 	}
 	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
 		result[left], result[right] = result[right], result[left]
@@ -1487,6 +1539,7 @@ type envelopeItem struct {
 	EventID     string
 	Filename    string
 	ContentType string
+	Header      map[string]any
 }
 
 func parseEnvelope(body []byte) ([]envelopeItem, error) {
@@ -1509,6 +1562,10 @@ func parseEnvelope(body []byte) ([]envelopeItem, error) {
 			index = next
 			continue
 		}
+		var rawHeader map[string]any
+		if err := json.Unmarshal(line, &rawHeader); err != nil {
+			return nil, errors.New("invalid item header")
+		}
 		var header struct {
 			Type        string `json:"type"`
 			Length      int    `json:"length"`
@@ -1524,7 +1581,7 @@ func parseEnvelope(body []byte) ([]envelopeItem, error) {
 			if header.Length > len(body)-index {
 				return nil, errors.New("truncated item")
 			}
-			items = append(items, envelopeItem{Type: header.Type, Payload: body[index : index+header.Length], EventID: header.EventID, Filename: header.Filename, ContentType: header.ContentType})
+			items = append(items, envelopeItem{Type: header.Type, Payload: body[index : index+header.Length], EventID: header.EventID, Filename: header.Filename, ContentType: header.ContentType, Header: rawHeader})
 			index += header.Length
 			if index < len(body) && body[index] == '\n' {
 				index++
@@ -1538,14 +1595,14 @@ func parseEnvelope(body []byte) ([]envelopeItem, error) {
 				return nil, err
 			}
 			consumed := int(decoder.InputOffset())
-			items = append(items, envelopeItem{Type: header.Type, Payload: payload, EventID: header.EventID, Filename: header.Filename, ContentType: header.ContentType})
+			items = append(items, envelopeItem{Type: header.Type, Payload: payload, EventID: header.EventID, Filename: header.Filename, ContentType: header.ContentType, Header: rawHeader})
 			index += consumed
 			if index < len(body) && body[index] == '\n' {
 				index++
 			}
 			continue
 		}
-		items = append(items, envelopeItem{Type: header.Type, Payload: bytes.TrimSpace(body[index:]), EventID: header.EventID, Filename: header.Filename, ContentType: header.ContentType})
+		items = append(items, envelopeItem{Type: header.Type, Payload: bytes.TrimSpace(body[index:]), EventID: header.EventID, Filename: header.Filename, ContentType: header.ContentType, Header: rawHeader})
 		break
 	}
 	return items, nil

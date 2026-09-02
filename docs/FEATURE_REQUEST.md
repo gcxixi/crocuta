@@ -40,22 +40,47 @@ automatically becomes a regression when a later event arrives.
 
 Alert rules support `new_issue`, `regression`, and event-count conditions,
 with a webhook action, threshold, window, cooldown, and enabled flag. The
-worker evaluates rules every 30 seconds outside the ingest transaction.
+worker evaluates rules every 30 seconds outside the ingest loop. Evaluation is
+serialized with a PostgreSQL advisory lock, filters `level`, `environment`, and
+`release` are enforced, and cooldown state is isolated per `(rule, issue)`.
+Webhook calls have a 10-second timeout and include issue identity, title,
+level, counts, latest event, stack-top frame, and optional direct URL from
+`SENTRYX_UI_BASE_URL`.
+
+`users` now always means distinct user identity inside the requested window;
+it is calculated exactly from event data rather than summing the historical
+`user_count` rollup. The `errors`, `issues`, and `users` project cards share the
+same `start`/`end` window, and PostgreSQL honors arbitrary positive series
+resolutions in the same way as the memory store. Standard SDK context fields
+(`browser`, `os`, `runtime`, release/environment/dist, URL, transaction, and
+user identity) are promoted to canonical tags during decoding.
 
 ## Retention, security, and reconciliation
 
-Migrations `006_feature_request.sql` and `007_grouping_migration.sql` add issue lifecycle columns, hourly
+Migrations `006_feature_request.sql`, `007_grouping_migration.sql`, and
+`008_issue_2_correctness.sql` add issue lifecycle columns, hourly
 rollups, alert rules, nullable completed-job payloads, and project retention
-configuration, plus persisted grouping-hash mappings and component trees. The worker performs batched cleanup hourly and clears queue
+configuration, persisted grouping-hash mappings/component trees, per-issue
+alert cooldown state, and operational indexes. The worker performs bounded
+5,000-row cleanup batches in a dedicated goroutine, clears queue
 payloads on acknowledgement. `SENTRYX_API_TOKEN_HASHES` accepts
 `sha256hex:user-id` entries; plaintext `SENTRYX_API_TOKENS` remains supported
-for local compatibility. `cmd/sentryx-reconcile` compares event IDs in the
-new and legacy stores and reports both sides' missing IDs. `sentryx-groupctl`
+for local compatibility. Blob-backed expired attachments and signals are
+reclaimed after the database transaction. `cmd/sentryx-reconcile` paginates
+both stores, supports `--start`, `--end`, and `--page-size`, calls the official
+Sentry `/api/0/projects/{org}/{project}/events/` endpoint, and reports missing
+events plus grouping mismatches. `sentryx-groupctl`
 replays JSONL or PostgreSQL events and reports grouping changes between two
 algorithm versions.
+
+Grouping v2 is now the default. During rolling upgrades it computes both v2
+and legacy v1 hashes; when v1 already resolves to an issue, the v2 mapping is
+attached to that same issue, preserving counters, state, first-seen time, and
+regression history. Set `SENTRYX_GROUPING_VERSION=v1` only for rollback.
 
 ## Operations
 
 The repository now includes `.github/workflows/ci.yml` for Go formatting,
-vet/tests, and Ant Design UI builds. `/health/live`, `/health/ready`, and the
+vet/tests (including installing root Node SDK dependencies), and Ant Design UI
+builds. `/health/live`, `/health/ready`, and the
 Prometheus text endpoint `/metrics` are available on both server and Relay.

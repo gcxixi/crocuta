@@ -177,8 +177,10 @@ func issueSortKey(issue Issue, sortName string) string {
 	switch sortName {
 	case "first_seen":
 		return issue.FirstSeen.UTC().Format(time.RFC3339Nano)
-	case "count", "users":
+	case "count":
 		return fmt.Sprintf("%020d", issue.Count)
+	case "users":
+		return fmt.Sprintf("%020d", issue.Users)
 	default:
 		return issue.LastSeen.UTC().Format(time.RFC3339Nano)
 	}
@@ -213,6 +215,22 @@ func eventMatches(event Event, options QueryOptions) bool {
 func (s *Store) ListIssuesPage(options QueryOptions) IssuePage {
 	options = defaultQueryOptions(options)
 	items := s.ListIssues(options.ProjectID)
+	if options.Sort == "users" {
+		usersByIssue := make(map[string]map[string]struct{})
+		for _, event := range s.ListEvents(options.ProjectID, "") {
+			identity := eventUserIdentity(event)
+			if identity == "" {
+				continue
+			}
+			if usersByIssue[event.IssueID] == nil {
+				usersByIssue[event.IssueID] = make(map[string]struct{})
+			}
+			usersByIssue[event.IssueID][identity] = struct{}{}
+		}
+		for index := range items {
+			items[index].Users = int64(len(usersByIssue[items[index].ID]))
+		}
+	}
 	filtered := items[:0]
 	for _, issue := range items {
 		if queryMatchesIssue(issue, options) {
@@ -314,6 +332,7 @@ func (s *Store) IssueSeries(projectID, issueID string, start, end time.Time, res
 		resolution = time.Hour
 	}
 	counts := make(map[time.Time]*SeriesPoint)
+	users := make(map[time.Time]map[string]struct{})
 	for _, event := range s.ListEvents(projectID, issueID) {
 		if !eventMatches(event, QueryOptions{ProjectID: projectID, IssueID: issueID, Start: start, End: end}) {
 			continue
@@ -325,12 +344,16 @@ func (s *Store) IssueSeries(projectID, issueID string, start, end time.Time, res
 			counts[bucket] = point
 		}
 		point.Count++
-		if event.User != nil && (event.User.ID != "" || event.User.Email != "") {
-			point.Users++
+		if identity := eventUserIdentity(event); identity != "" {
+			if users[bucket] == nil {
+				users[bucket] = make(map[string]struct{})
+			}
+			users[bucket][identity] = struct{}{}
 		}
 	}
 	result := make([]SeriesPoint, 0, len(counts))
 	for _, point := range counts {
+		point.Users = int64(len(users[point.Bucket]))
 		result = append(result, *point)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Bucket.Before(result[j].Bucket) })
@@ -379,8 +402,27 @@ func (s *Store) ProjectStats(projectID string, start, end time.Time) map[string]
 		}
 	}
 	result["users"] = int64(len(users))
-	result["issues"] = int64(len(s.ListIssues(projectID)))
+	issueIDs := make(map[string]struct{})
+	for _, event := range s.ListEvents(projectID, "") {
+		if eventMatches(event, QueryOptions{ProjectID: projectID, Start: start, End: end}) {
+			issueIDs[event.IssueID] = struct{}{}
+		}
+	}
+	result["issues"] = int64(len(issueIDs))
 	return result
+}
+
+func eventUserIdentity(event Event) string {
+	if event.User == nil {
+		return ""
+	}
+	if event.User.ID != "" {
+		return "id:" + event.User.ID
+	}
+	if event.User.Email != "" {
+		return "email:" + strings.ToLower(event.User.Email)
+	}
+	return ""
 }
 
 func (s *Store) ListAlertRules(projectID string) []AlertRule {
@@ -429,9 +471,12 @@ func (s *Store) DeleteAlertRule(projectID, id string) bool {
 type Metrics struct {
 	mu       sync.RWMutex
 	counters map[string]*atomic.Uint64
+	gauges   map[string]*atomic.Int64
 }
 
-func NewMetrics() *Metrics { return &Metrics{counters: make(map[string]*atomic.Uint64)} }
+func NewMetrics() *Metrics {
+	return &Metrics{counters: make(map[string]*atomic.Uint64), gauges: make(map[string]*atomic.Int64)}
+}
 
 func (m *Metrics) Inc(name string, labels map[string]string) {
 	if m == nil {
@@ -453,7 +498,7 @@ func (m *Metrics) Inc(name string, labels map[string]string) {
 	counter.Add(1)
 }
 
-func (m *Metrics) Set(name string, labels map[string]string, value uint64) {
+func (m *Metrics) Add(name string, labels map[string]string, value uint64) {
 	if m == nil {
 		return
 	}
@@ -465,7 +510,26 @@ func (m *Metrics) Set(name string, labels map[string]string, value uint64) {
 		m.counters[key] = counter
 	}
 	m.mu.Unlock()
-	counter.Store(value)
+	counter.Add(value)
+}
+
+func (m *Metrics) Set(name string, labels map[string]string, value uint64) {
+	m.SetGauge(name, labels, int64(value))
+}
+
+func (m *Metrics) SetGauge(name string, labels map[string]string, value int64) {
+	if m == nil {
+		return
+	}
+	key := metricKey(name, labels)
+	m.mu.Lock()
+	gauge := m.gauges[key]
+	if gauge == nil {
+		gauge = &atomic.Int64{}
+		m.gauges[key] = gauge
+	}
+	m.mu.Unlock()
+	gauge.Store(value)
 }
 
 func (m *Metrics) Snapshot() map[string]uint64 {
@@ -477,6 +541,12 @@ func (m *Metrics) Snapshot() map[string]uint64 {
 	defer m.mu.RUnlock()
 	for key, value := range m.counters {
 		result[key] = value.Load()
+	}
+	for key, value := range m.gauges {
+		current := value.Load()
+		if current >= 0 {
+			result[key] = uint64(current)
+		}
 	}
 	return result
 }
