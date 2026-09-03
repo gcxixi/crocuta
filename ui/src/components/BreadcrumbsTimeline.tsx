@@ -40,7 +40,7 @@ export function BreadcrumbsTimeline({ breadcrumbs }: { breadcrumbs?: Breadcrumb[
     const hasData = crumb.data && Object.keys(crumb.data).length > 0
     return {
       dot: getCategoryIcon(crumb.category, crumb.type),
-      children: (
+      content: (
         <div className="breadcrumb-item" key={idx}>
           <div className="breadcrumb-header">
             {crumb.category && <Tag color="blue">{crumb.category}</Tag>}

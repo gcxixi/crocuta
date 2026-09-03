@@ -53,8 +53,8 @@ export function ReportsPage() {
   return (
     <>
       <PageHeader
-        title="Client Reports"
-        subtitle="客户端 SDK 自动生成的采样与丢弃原因统计报告"
+        title="客户端报告"
+        subtitle="SDK 采样与丢弃原因统计"
         extra={
           <Button icon={<ReloadOutlined />} onClick={() => void query.refetch()}>
             刷新
@@ -65,16 +65,16 @@ export function ReportsPage() {
       <div className="stats-grid">
         <Card className="stat-card" size="small">
           <Statistic
-            title={<Space><FileSearchOutlined style={{ color: "#6366f1" }} /><span>总上报数 (Reports)</span></Space>}
+            title={<Space><FileSearchOutlined className="tone-primary" /><span>报告总数</span></Space>}
             value={reports.length}
-            valueStyle={{ color: "#6366f1", fontWeight: 700 }}
+            valueStyle={{ fontWeight: 700 }}
           />
         </Card>
         <Card className="stat-card" size="small">
           <Statistic
-            title={<Space><DisconnectOutlined style={{ color: "#ef4444" }} /><span>累计丢弃事件总数</span></Space>}
+            title={<Space><DisconnectOutlined className="tone-danger" /><span>累计丢弃事件</span></Space>}
             value={totalDiscarded}
-            valueStyle={{ color: "#ef4444", fontWeight: 700 }}
+            valueStyle={{ fontWeight: 700 }}
           />
         </Card>
       </div>

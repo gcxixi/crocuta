@@ -1,5 +1,5 @@
 import React from "react"
-import { Alert, Breadcrumb, Button, Flex, Spin, Tag, Typography, message } from "antd"
+import { Alert, App, Breadcrumb, Button, Flex, Spin, Tag, Typography } from "antd"
 import { CopyOutlined, CheckOutlined } from "@ant-design/icons"
 
 export function formatTime(value?: string) {
@@ -45,12 +45,13 @@ export function ErrorView({ error, retry }: { error: Error; retry?: () => void }
 export function Loading({ tip = "加载中..." }: { tip?: string }) {
   return (
     <Flex justify="center" align="center" className="loading">
-      <Spin size="large" tip={tip} />
+      <Spin size="large" description={tip} />
     </Flex>
   )
 }
 
 export function JsonView({ value, maxHeight = 420 }: { value: unknown; maxHeight?: number }) {
+  const { message } = App.useApp()
   const [copied, setCopied] = React.useState(false)
   const jsonStr = JSON.stringify(value ?? {}, null, 2)
 
@@ -93,22 +94,15 @@ export function PageHeader({
   breadcrumbTitle?: React.ReactNode
   extra?: React.ReactNode
 }) {
-  const lastTitle = breadcrumbTitle ?? title
+  const lastTitle = breadcrumbTitle ?? <Typography.Text strong>{title}</Typography.Text>
   const allBreadcrumbs = [{ title: "SentryX" }, ...breadcrumbItems, { title: lastTitle }]
   return (
-    <Flex justify="space-between" align="center" className="page-header">
-      <div>
-        <Breadcrumb items={allBreadcrumbs} />
-        <Typography.Title level={2} style={{ marginBottom: 0 }}>
-          {title}
-        </Typography.Title>
-        {subtitle && (
-          <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-            {subtitle}
-          </Typography.Text>
-        )}
-      </div>
-      {extra && <div>{extra}</div>}
+    <Flex justify="space-between" align="center" gap={12} className="page-header">
+      <Flex align="center" gap={10} className="page-header-context">
+        <Breadcrumb items={allBreadcrumbs} className="page-header-breadcrumb" />
+        {subtitle && <Typography.Text type="secondary" ellipsis className="page-header-subtitle">{subtitle}</Typography.Text>}
+      </Flex>
+      {extra && <div className="page-header-actions">{extra}</div>}
     </Flex>
   )
 }

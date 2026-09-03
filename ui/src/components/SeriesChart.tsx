@@ -3,10 +3,10 @@ import { Empty } from "antd"
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import type { SeriesPoint } from "../api"
 
-export function SeriesChart({ data }: { data: SeriesPoint[] }) {
+export function SeriesChart({ data, compact = false }: { data: SeriesPoint[]; compact?: boolean }) {
   if (data.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前时间窗没有事件" />
   const points = data.map((point) => ({ ...point, label: new Date(point.bucket).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) }))
-  return <div style={{ width: "100%", height: 280 }}>
+  return <div style={{ width: "100%", height: compact ? 190 : 280 }}>
     <ResponsiveContainer>
       <ComposedChart data={points} margin={{ top: 8, right: 8, bottom: 8, left: 0 }}>
         <CartesianGrid strokeDasharray="3 3" vertical={false} />

@@ -141,7 +141,7 @@ function ExceptionTab({ event }: { event: Event }) {
   const tagsList = event.tags ? Object.entries(event.tags) : []
 
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size="small">
+    <Space orientation="vertical" style={{ width: "100%" }} size="small">
       {exceptionObj && (
         <Descriptions bordered size="small" column={{ xs: 1, sm: 2, md: 3 }}>
           <Descriptions.Item label="Type">
@@ -185,7 +185,7 @@ function TagsAndContextsTab({ event }: { event: Event }) {
   }
 
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size="small">
+    <Space orientation="vertical" style={{ width: "100%" }} size="small">
       {hasContexts && (
         <Card size="small" title="Contexts (Browser, OS, Runtime...)" type="inner">
           <JsonView value={event.contexts} maxHeight={220} />
@@ -233,7 +233,7 @@ function RequestTab({ event }: { event: Event }) {
     : []
 
   return (
-    <Space direction="vertical" style={{ width: "100%" }} size="small">
+    <Space orientation="vertical" style={{ width: "100%" }} size="small">
       <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }}>
         <Descriptions.Item label="Method">
           <Tag color="geekblue">{req.method || "GET"}</Tag>

@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from "react"
+import React, { useState, useEffect, useRef } from "react"
 import {
-  Alert,
   Button,
   Card,
   Empty,
@@ -19,6 +18,7 @@ import {
   DownOutlined,
   RightOutlined,
   CopyOutlined,
+  AimOutlined,
 } from "@ant-design/icons"
 import type { Event, Frame } from "../api"
 
@@ -28,6 +28,7 @@ export function StackTrace({ event }: { event: Event }) {
   const hasRaw = (event.frames?.length ?? 0) > 0
   const [frameType, setFrameType] = useState<"symbolicated" | "raw">("symbolicated")
   const [expandedSet, setExpandedSet] = useState<Record<number, boolean>>({})
+  const sourceFrameRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (hasSymbolicated) {
@@ -69,6 +70,20 @@ export function StackTrace({ event }: { event: Event }) {
   }
 
   const allExpanded = filteredFrames.length > 0 && filteredFrames.every((_, idx) => expandedSet[idx])
+  const inAppSourceIndex = filteredFrames.findIndex((frame) => frame.in_app && Boolean(frame.context_line))
+  const anySourceIndex = filteredFrames.findIndex((frame) => Boolean(frame.context_line))
+  const sourceFrameIndex = inAppSourceIndex >= 0 ? inAppSourceIndex : anySourceIndex
+
+  const locateSourceFrame = () => {
+    setExpandedSet((current) => ({ ...current, [sourceFrameIndex]: true }))
+    window.requestAnimationFrame(() => {
+      sourceFrameRef.current?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "center",
+      })
+      sourceFrameRef.current?.focus({ preventScroll: true })
+    })
+  }
 
   return (
     <Card
@@ -76,7 +91,7 @@ export function StackTrace({ event }: { event: Event }) {
         <Space size="middle">
           <Space>
             <CodeOutlined style={{ color: "#6366f1" }} />
-            <span>Stack</span>
+            <span>源码调用栈</span>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
             {filteredFrames.length} 帧
@@ -85,6 +100,9 @@ export function StackTrace({ event }: { event: Event }) {
       }
       extra={
         <Space wrap>
+          {sourceFrameIndex >= 0 && (
+            <Button icon={<AimOutlined />} onClick={locateSourceFrame}>定位报错行</Button>
+          )}
           {hasSymbolicated && hasRaw && (
             <Radio.Group
               size="small"
@@ -123,20 +141,9 @@ export function StackTrace({ event }: { event: Event }) {
           )}
         </Space>
       }
-      className="content-card mb24"
+      className="content-card stack-card"
       styles={{ body: { padding: 0 } }}
     >
-      {status === "miss" && (
-        <div style={{ padding: "16px 20px 0" }}>
-          <Alert
-            type="warning"
-            showIcon
-            message="Source Map 未匹配"
-            description="当前显示原始混淆/压缩堆栈。请确认 Release 与 Artifact 是否已正确上传。"
-          />
-        </div>
-      )}
-
       {filteredFrames.length === 0 ? (
         <div style={{ padding: 32 }}>
           <Empty description={onlyInApp ? "没有匹配的应用代码帧 (已过滤第三方库)" : "该事件没有 Stack Trace 数据"} />
@@ -154,11 +161,16 @@ export function StackTrace({ event }: { event: Event }) {
               <div
                 key={`${frame.filename}-${frame.lineno}-${frame.colno}-${index}`}
                 className={`sentry-frame-node ${frame.in_app ? "is-in-app" : "is-library"}`}
+                ref={index === sourceFrameIndex ? sourceFrameRef : undefined}
+                tabIndex={index === sourceFrameIndex ? -1 : undefined}
               >
                 {/* Unified Frame Header Row */}
-                <div
+                <button
+                  type="button"
                   className={`sentry-frame-header ${hasContext ? "clickable" : ""}`}
                   onClick={() => hasContext && toggleExpand(index)}
+                  disabled={!hasContext}
+                  aria-expanded={hasContext ? isExpanded : undefined}
                 >
                   <Flex align="center" justify="space-between" style={{ width: "100%" }}>
                     <Space size="middle">
@@ -192,7 +204,7 @@ export function StackTrace({ event }: { event: Event }) {
                       </Tag>
                     </Space>
                   </Flex>
-                </div>
+                </button>
 
                 {/* Seamless Embedded Code Viewer */}
                 {isExpanded && hasContext && (

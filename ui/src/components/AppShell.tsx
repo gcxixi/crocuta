@@ -1,5 +1,6 @@
 import React, { useState } from "react"
 import {
+  App,
   Button,
   Empty,
   Flex,
@@ -13,7 +14,6 @@ import {
   Space,
   Tag,
   Typography,
-  message,
 } from "antd"
 import {
   BugOutlined,
@@ -46,6 +46,7 @@ import { SettingsPage } from "../pages/SettingsPage"
 import { ProjectOverviewPage } from "../pages/ProjectOverviewPage"
 
 export function AppShell() {
+  const { message } = App.useApp()
   const location = useLocation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -151,9 +152,11 @@ export function AppShell() {
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
-        theme="dark"
+        breakpoint="lg"
+        collapsedWidth={56}
+        theme="light"
         className="app-sider"
-        width={230}
+        width={216}
       >
         <div className="brand">
           <div className="brand-icon">
@@ -168,7 +171,7 @@ export function AppShell() {
         </div>
 
         <Menu
-          theme="dark"
+          theme="light"
           mode="inline"
           selectedKeys={[activeKey]}
           items={navItems.map((item) => ({
@@ -194,7 +197,7 @@ export function AppShell() {
               <Select
                 aria-label="project"
                 value={selectedProject}
-                style={{ minWidth: 240 }}
+                className="project-switcher"
                 options={projectList.map((item) => ({
                   value: item.id,
                   label: `${item.name} (${item.slug})`,
@@ -203,6 +206,7 @@ export function AppShell() {
               />
               <Button
                 icon={<PlusOutlined />}
+                className="new-project-button"
                 onClick={() => setOpenCreateProject(true)}
               >
                 新建项目

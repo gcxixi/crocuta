@@ -118,8 +118,8 @@ export function SignalsPage() {
   return (
     <>
       <PageHeader
-        title="Signals"
-        subtitle="非错误类 Sentry Envelope 扩展信号 (Performance, Replay, Session, Profile 等)"
+        title="扩展信号"
+        subtitle="Performance、Replay、Session 与 Profile 等 Envelope 信号"
         extra={
           <Button icon={<ReloadOutlined />} onClick={() => void query.refetch()}>
             刷新
@@ -130,23 +130,23 @@ export function SignalsPage() {
       <div className="stats-grid">
         <Card className="stat-card" size="small">
           <Statistic
-            title={<Space><FundProjectionScreenOutlined style={{ color: "#6366f1" }} /><span>总 Signal 数</span></Space>}
+            title={<Space><FundProjectionScreenOutlined className="tone-primary" /><span>信号总数</span></Space>}
             value={rawSignals.length}
-            valueStyle={{ color: "#6366f1", fontWeight: 700 }}
+            valueStyle={{ fontWeight: 700 }}
           />
         </Card>
         <Card className="stat-card" size="small">
           <Statistic
-            title={<Space><ThunderboltOutlined style={{ color: "#8b5cf6" }} /><span>Transactions / Spans</span></Space>}
+            title={<Space><ThunderboltOutlined className="tone-data" /><span>性能信号</span></Space>}
             value={txCount}
-            valueStyle={{ color: "#8b5cf6", fontWeight: 700 }}
+            valueStyle={{ fontWeight: 700 }}
           />
         </Card>
         <Card className="stat-card" size="small">
           <Statistic
-            title={<Space><VideoCameraOutlined style={{ color: "#0ea5e9" }} /><span>Replay Recordings</span></Space>}
+            title={<Space><VideoCameraOutlined className="tone-secondary" /><span>回放信号</span></Space>}
             value={replayCount}
-            valueStyle={{ color: "#0ea5e9", fontWeight: 700 }}
+            valueStyle={{ fontWeight: 700 }}
           />
         </Card>
       </div>

@@ -1,8 +1,9 @@
 import React, { useState } from "react"
-import { Button, Card, Space, Tabs, Typography, message } from "antd"
+import { App, Button, Card, Space, Tabs, Typography } from "antd"
 import { CopyOutlined, CheckOutlined, RocketOutlined } from "@ant-design/icons"
 
 export function SdkQuickStart({ dsn }: { dsn?: string }) {
+  const { message } = App.useApp()
   const [copied, setCopied] = useState(false)
   const activeDsn = dsn || "http://public@localhost:8081/1"
 
