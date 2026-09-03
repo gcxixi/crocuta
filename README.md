@@ -96,3 +96,70 @@ Relay 可通过 `SENTRYX_ITEM_POLICY=transaction:drop,session:drop,replay_event:
 分组算法升级前可使用 `sentryx-groupctl replay --source=pg --version=v2 --compare=v1 --project=<id>` 进行离线回放对比。
 
 NUC 真实 SDK E2E 的启动、执行、数据库核对和重启恢复步骤见 [`docs/e2e-nuc.md`](docs/e2e-nuc.md)。
+
+## 本地 Docker Compose 调试
+
+仓库根目录提供了 `Makefile`，用于统一常见的构建、迁移、重启、健康检查和日志命令。先确保 Docker daemon 已启动，然后查看全部命令：
+
+```bash
+make help
+```
+
+Make 调试目标默认使用以下宿主机端口，避免与常见的本地 PostgreSQL 和前端开发服务冲突：
+
+| 服务 | 地址或端口 |
+| --- | --- |
+| UI | `http://localhost:33000` |
+| Server API | `http://localhost:18080` |
+| Relay | `http://localhost:8081` |
+| PostgreSQL | `localhost:15432` |
+
+端口可在执行时覆盖，例如：
+
+```bash
+make up SENTRYX_UI_PORT=3000 SENTRYX_POSTGRES_PORT=5432
+```
+
+常用工作流：
+
+```bash
+# 启动完整服务；等待 PostgreSQL、按文件名顺序执行迁移并检查 API
+make up
+
+# 停止后按依赖顺序重新启动，避免同时重启 PostgreSQL 与 Server 的竞态
+make restart
+
+# 仅重新构建并替换 UI，不重启 Server、Relay 或 PostgreSQL
+make ui-rebuild
+
+# 重建所有镜像并重启完整服务
+make rebuild
+
+# 查看状态、执行健康检查
+make ps
+make health
+
+# 跟随所有日志，或只查看指定服务
+make logs
+make logs SERVICE=server TAIL=200
+```
+
+数据库升级与排查：
+
+```bash
+# 对已有数据卷幂等执行 migrations/*.sql
+make db-migrate
+
+# 进入 Compose PostgreSQL
+make db-shell
+```
+
+`make stop` 只停止容器；`make down` 删除容器和 Compose 网络，但保留 `sentryx-postgres` 与 `sentryx-blobs` 命名卷。Makefile 刻意不提供删除数据卷的快捷目标，避免调试时误删本地数据。
+
+提交前可运行：
+
+```bash
+make test
+```
+
+该目标执行 Go 全量测试及 UI TypeScript/Vite 生产构建。
